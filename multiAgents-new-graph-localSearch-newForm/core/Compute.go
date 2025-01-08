@@ -100,7 +100,8 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 				dist := Distance(task.Position.X, task.Position.Y, drone.Position.X, drone.Position.Y)
 				if drone.RemainingPower > dist+task.CostPow+task.ChargeDist {
 					//m[task.Id]++
-					urgent := drone.RemainingPower / drone.FullPower
+					x := drone.RemainingPower / drone.FullPower
+					urgent := (1 - math.Exp(-1*x)) / (1 - math.Exp(-1))
 					m[task.Id] = urgent + m[task.Id]
 				}
 			}
@@ -136,7 +137,7 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 			}
 
 			//score = m[task.Id] / (minDroneDist + beishu*minWorkerDist + alpha)
-			score = m[task.Id] / (minDroneTime + minWorkerTime + alpha)
+			score = math.Pow(m[task.Id], 0.6) / (math.Pow(m[task.Id], 0.6) + (minDroneTime+minWorkerTime)/10)
 
 			cs[task.Id] = score
 		}
@@ -157,7 +158,8 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 			for _, charge := range charges {
 				dist := Distance(charge.Position.X, charge.Position.Y, position.X, position.Y)
 				if remainingPower > dist {
-					urgent := drone.RemainingPower / drone.FullPower
+					x := drone.RemainingPower / drone.FullPower
+					urgent := (1 - math.Exp(-1*x)) / (1 - math.Exp(-1))
 					m[charge.Id] = urgent + m[charge.Id]
 				}
 			}
@@ -176,7 +178,8 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 			for _, charge := range charges {
 				dist := Distance(charge.Position.X, charge.Position.Y, position.X, position.Y)
 				if remainingPower > dist {
-					urgent := remainingPower / action.Drone.FullPower
+					x := remainingPower / action.Drone.FullPower
+					urgent := (1 - math.Exp(-1*x)) / (1 - math.Exp(-1))
 					m[charge.Id] = urgent + m[charge.Id]
 				}
 			}
@@ -206,7 +209,7 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 				}
 			}
 			//score = m[charge.Id] / (minCarDist + alpha)
-			score = m[charge.Id] / (minCarTime + alpha)
+			score = math.Pow(m[charge.Id], 0.6) / (math.Pow(m[charge.Id], 0.6) + (minCarTime)/10)
 			cs[charge.Id] = score
 		}
 		return cs
@@ -243,14 +246,14 @@ func PotentialTaskChange(taskPoints map[int]*TaskPoint, chargePoints map[int]*Ch
 	if node.NodeType == DroneToTask || node.NodeType == DroneWorkerToTask || node.NodeType == WorkerToTask || node.NodeType == WorkerToCharge {
 		for id := range finalCS {
 			if finalCS[id]-initialCS[id] > 0 {
-				count = count + 1
+				count = count + finalCS[id]
 			}
 		}
 		//return float64(finalPotentialTasks - initialPotentialTasks)
 	} else {
 		for id := range finalChargeCS {
 			if finalChargeCS[id]-initialChargeCS[id] > 0 {
-				count = count + 1
+				count = count + finalChargeCS[id]
 			}
 		}
 		//return float64(finalPotentialCharges - initialPotentialCharges)
@@ -470,7 +473,8 @@ func DataProcess(name string) []Folder {
 }
 
 // updateResultInThirdColumn 根据文件夹名称更新第三列的结果
-func UpdateResultInThirdColumn(records [][]string, name string, folder Folder, result, maxFl float64) [][]string {
+// updateResultInThirdColumn 根据文件夹名称更新第三列的结果
+func UpdateResultInThirdColumn(records [][]string, name string, folder Folder, result, maxFl, costTime float64) [][]string {
 
 	// 遍历工作表中的每一行，找到对应的文件夹名称并更新第三列
 	for i, row := range records {
@@ -505,6 +509,7 @@ func UpdateResultInThirdColumn(records [][]string, name string, folder Folder, r
 			// 更新第三列的值
 			records[i][3] = fmt.Sprintf("%.4f", result)
 			records[i][4] = fmt.Sprintf("%.4f", maxFl)
+			records[i][5] = fmt.Sprintf("%.4f", costTime)
 		}
 	}
 	// 循环结束后保存文件，这样只更新特定单元格，其他内容不变

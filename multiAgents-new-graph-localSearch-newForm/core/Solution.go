@@ -115,8 +115,8 @@ func (s *Solution) isMaximal() bool {
 // omegaImprovement 方法
 // 在空闲节点中，找到能加入进来产生增益的节点加入
 func (s *Solution) omegaImprovement() bool {
-	for _, v := range s.freeNodes {
-		if s.mu[v] > 0 {
+	for v := range s.g.Nodes {
+		if s.mu[v] > ZeroEpsilon && !s.solution[v] {
 			// 移除 v 的所有相邻节点
 			for neighbor := range s.solution {
 				if s.g.isNeighbor(v, neighbor) {

@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"time"
 )
 
 // Graph 结构体表示有向无权图
@@ -406,7 +407,7 @@ func (g *Graph) getCommonNeighbors(node1Key, node2Key string) []string {
 }
 
 func (g *Graph) HILS() *Solution {
-
+	start := time.Now()
 	s := NewSolution(g)
 
 	// 随机初始化解
@@ -418,19 +419,26 @@ func (g *Graph) HILS() *Solution {
 		}
 	}
 
-	// 局部改进循环
-	for s.omegaImprovement() || s.twoImprovement() {
-		// 不断改进解
+	flag := true
+	for flag {
+		flag1 := s.omegaImprovement()
+		//flag2 := s.AAPMoves()
+		if !(flag1) {
+			flag = s.twoImprovement()
+		}
+		for !s.isMaximal() {
+			s.addRandomVertex()
+		}
 	}
 
 	bestSolution := new(Solution)
 	copySolution(s, bestSolution)
 	localBestWeight := s.weight
 	iter := 0
-	//maxUpdateIter := 0
-	p1 := 1
-	p2 := 2
-	p3 := 3 //扰乱程度
+	maxUpdateIter := 0
+	p1 := 3
+	p2 := 4
+	p3 := 2 //扰乱程度
 	k := 1
 	maxIterations := 1000 // 根据需要设置
 
@@ -448,8 +456,16 @@ func (g *Graph) HILS() *Solution {
 		for !nextSolution.isMaximal() {
 			nextSolution.addRandomVertex()
 		}
-		for nextSolution.omegaImprovement() || nextSolution.twoImprovement() {
-			// 不断改进解
+		flag := true
+		for flag {
+			flag1 := nextSolution.omegaImprovement()
+			//flag2 := s.AAPMoves()
+			if !(flag1) {
+				flag = nextSolution.twoImprovement()
+			}
+			for !nextSolution.isMaximal() {
+				nextSolution.addRandomVertex()
+			}
 		}
 
 		if nextSolution.weight > s.weight {
@@ -464,7 +480,7 @@ func (g *Graph) HILS() *Solution {
 			if bestSolution.weight < s.weight {
 				copySolution(s, bestSolution)
 				k -= len(s.solution) * p2
-				//maxUpdateIter = iter
+				maxUpdateIter = iter
 				//fmt.Printf("New best weight: %d at iteration %d\n", bestSolution.weight, iter)
 			}
 		} else if k <= len(s.solution)/p1 {
@@ -476,9 +492,11 @@ func (g *Graph) HILS() *Solution {
 		}
 
 	}
-	//fmt.Printf("max Iter: %d\n", maxUpdateIter)
-	//fmt.Printf("Best solution weight: %d\n", bestSolution.weight)
-	//fmt.Printf("Solution nodes: %v\n", bestSolution.solution)
+	fmt.Printf("max Iter: %d\n", maxUpdateIter)
+	fmt.Printf("Best solution weight: %d\n", bestSolution.weight)
+	fmt.Printf("Solution nodes: %v\n", bestSolution.solution)
+	elapsed := time.Since(start).Seconds()
+	println("总耗时", elapsed, "s")
 	return bestSolution
 }
 func copySolution(s *Solution, nextSolution *Solution) {

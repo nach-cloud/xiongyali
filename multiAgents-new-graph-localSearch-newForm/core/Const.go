@@ -5,7 +5,7 @@ var DecideTime int = 10 //决策时间间隔
 var DecideCount int = 18 //决策次数
 // const NeedChargePower float64 = 15 //能移动的距离低于多少需要充电
 const TaskTime = 0
-
+const ZeroEpsilon float64 = 1e-10
 const w6 = 1e6
 const w5 = 1e5
 const w4 = 1e4

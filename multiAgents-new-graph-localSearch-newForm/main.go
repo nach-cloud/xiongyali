@@ -6,6 +6,7 @@ import (
 	"multiAgents/core"
 	"os"
 	"sort"
+	"time"
 )
 
 var agents []core.Agent                //当前在线的智能体
@@ -15,7 +16,7 @@ var uuidAgent map[string]core.Agent //实时的空闲智能体数目 //本次决
 
 func main() {
 
-	name := "data/Random_data1/test3.csv"
+	name := "data/Random_data1/testRealData10min.csv"
 	folers := core.DataProcess(name)
 	f, err := os.Open(name)
 	defer f.Close()
@@ -24,6 +25,7 @@ func main() {
 	}
 	reader := csv.NewReader(f)
 	records, _ := reader.ReadAll()
+	elapsed := 0.0
 	for _, folder := range folers {
 		core.DecideTime = folder.DecideTime
 		core.DecideCount = folder.DecideCount
@@ -39,6 +41,7 @@ func main() {
 		FolerResults := make([]float64, 0)
 		println(folder.Name, "文件已经开始,当前decideTime", core.DecideTime, "decideCount", core.DecideCount)
 		for i := 1; i <= 10; i++ {
+			start := time.Now()
 			println("第", i, "轮计算")
 			taskPoints = make(map[int]*core.TaskPoint)
 			chargePoints = make(map[int]*core.ChargePoint)
@@ -49,7 +52,7 @@ func main() {
 			//allDistance = 0.0
 			//pre := "data/random/20_20-80-30-90-30_13_20"
 
-			pre := "data/Random_data1/" + folder.Name
+			pre := "./../1.6data/1.6data1/" + folder.Name
 			_, allAgents, allTakPoints, allChargePoints, uuidAgent, dates, err = core.LoadMapData(pre+"/uavMap.xlsx", pre+"/workerMap.xlsx", pre+"/carMap.xlsx", pre+"/taskMap.xlsx", pre+"/chargeMap.xlsx")
 
 			if err != nil {
@@ -94,8 +97,6 @@ func main() {
 								cars = append(cars, car)
 							}
 						}
-						workerAvgSpeed = workerAvgSpeed / float64(len(workers))
-						core.CalculateDensity(taskPoints, 2*workerAvgSpeed*float64(core.DecideTime))
 
 						//构造有权无象图,各个节点的状态，各个智能体的状态
 						graph := core.BuildGraph(taskPoints, drones, cars, workers, chargePoints, actions, i)
@@ -123,6 +124,8 @@ func main() {
 			println("完成率为", perResult)
 			results += perResult
 			resultArr = append(resultArr, perResult)
+			elapsed += time.Since(start).Seconds()
+			println("总耗时", elapsed, "s")
 		}
 
 		println("平均值：", results/10)
@@ -131,7 +134,7 @@ func main() {
 		}
 		sort.Float64s(resultArr)
 		FolerResults = append(FolerResults, results/10)
-		records = core.UpdateResultInThirdColumn(records, name, folder, results/10, resultArr[len(resultArr)-1])
+		records = core.UpdateResultInThirdColumn(records, name, folder, results/10, resultArr[len(resultArr)-1], elapsed/10)
 		f, _ = os.OpenFile(name, os.O_RDWR|os.O_TRUNC, 0666)
 		defer f.Close()
 		writer := csv.NewWriter(f)
