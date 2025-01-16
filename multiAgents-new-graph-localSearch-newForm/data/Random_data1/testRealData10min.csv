@@ -1,6 +1,6 @@
 data,DecideTime,AllTime,AvgComplete,MaxComplete,Cost
 Random_1,10min,2h,0.9513,0.9750,607.4878
-Random_1,10min,3h,,,
+Random_1,10min,3h,1,1,1450.676
 Random_1,10min,4h,,,
 Random_1,10min,3h,,,
 Random_2,10min,3h,,,

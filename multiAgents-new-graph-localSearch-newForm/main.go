@@ -16,7 +16,7 @@ var uuidAgent map[string]core.Agent //实时的空闲智能体数目 //本次决
 
 func main() {
 
-	name := "data/Random_data1/testRealData10min.csv"
+	name := "data/1.15data/test10min.csv"
 	folers := core.DataProcess(name)
 	f, err := os.Open(name)
 	defer f.Close()
@@ -40,7 +40,8 @@ func main() {
 		results := 0.0
 		FolerResults := make([]float64, 0)
 		println(folder.Name, "文件已经开始,当前decideTime", core.DecideTime, "decideCount", core.DecideCount)
-		for i := 1; i <= 10; i++ {
+		all := 1
+		for i := 1; i <= all; i++ {
 			start := time.Now()
 			println("第", i, "轮计算")
 			taskPoints = make(map[int]*core.TaskPoint)
@@ -52,8 +53,8 @@ func main() {
 			//allDistance = 0.0
 			//pre := "data/random/20_20-80-30-90-30_13_20"
 
-			pre := "./../1.6data/1.6data1/" + folder.Name
-			_, allAgents, allTakPoints, allChargePoints, uuidAgent, dates, err = core.LoadMapData(pre+"/uavMap.xlsx", pre+"/workerMap.xlsx", pre+"/carMap.xlsx", pre+"/taskMap.xlsx", pre+"/chargeMap.xlsx")
+			pre := "./../1.15dataCSV/" + folder.Name
+			_, allAgents, allTakPoints, allChargePoints, uuidAgent, dates, err = core.LoadMapData(pre+"/uavMap.csv", pre+"/workerMap.csv", pre+"/carMap.csv", pre+"/taskMap.csv", pre+"/chargeMap.csv")
 
 			if err != nil {
 				fmt.Println("Error loading map data:", err)
@@ -128,19 +129,20 @@ func main() {
 			println("总耗时", elapsed, "s")
 		}
 
-		println("平均值：", results/10)
+		println("平均值：", results/float64(all))
 		for _, result := range resultArr {
 			print(result, " ")
 		}
 		sort.Float64s(resultArr)
-		FolerResults = append(FolerResults, results/10)
-		records = core.UpdateResultInThirdColumn(records, name, folder, results/10, resultArr[len(resultArr)-1], elapsed/10)
+		FolerResults = append(FolerResults, results/float64(all))
+		records = core.UpdateResultInThirdColumn(records, name, folder, results/float64(all), resultArr[len(resultArr)-1], elapsed/float64(all))
 		f, _ = os.OpenFile(name, os.O_RDWR|os.O_TRUNC, 0666)
 		defer f.Close()
 		writer := csv.NewWriter(f)
 		if err := writer.WriteAll(records); err != nil {
 			println(err)
 		}
+		elapsed = 0
 	}
 
 }

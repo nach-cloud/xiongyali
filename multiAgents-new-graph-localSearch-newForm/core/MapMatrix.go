@@ -1,10 +1,11 @@
 package core
 
 import (
+	"encoding/csv"
 	"fmt"
 	"github.com/google/uuid"
-	"github.com/xuri/excelize/v2"
 	"log"
+	"os"
 	"strconv"
 )
 
@@ -16,8 +17,8 @@ type MapMatrix struct {
 }
 
 // LoadMapData 从文件读取数据并返回 mapData 和 Agent 集合
+// csv格式
 func LoadMapData(uavMapFile, workerMapFile, carMapFile, taskMapFile, chargeMapFile string) (*MapMatrix, []Agent, map[int]*TaskPoint, map[int]*ChargePoint, map[string]Agent, []bool, error) {
-	// 创建一个 MapMatrix 结构体
 	width, height := 100, 100 // 假设地图的宽度和高度为 100，可以根据需要调整
 	uuidAgent := make(map[string]Agent)
 	mapMatrix := &MapMatrix{
@@ -32,35 +33,39 @@ func LoadMapData(uavMapFile, workerMapFile, carMapFile, taskMapFile, chargeMapFi
 		mapMatrix.ChargeMap[i] = make([]int, width)
 	}
 	dates := make([]bool, 50)
-	// 创建一个 Agent 列表
 	agents := make([]Agent, 0)
-	taskPoints := make(map[int]*TaskPoint) // 读取 uavMap 数据
+	taskPoints := make(map[int]*TaskPoint)
 	chargePoints := make(map[int]*ChargePoint)
-	uavFile, err := excelize.OpenFile(uavMapFile)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法打开无人机表格文件: %v", err)
+
+	// Helper function to parse CSV files
+	parseCSV := func(filePath string) ([][]string, error) {
+		file, err := os.Open(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("无法打开文件 %s: %v", filePath, err)
+		}
+		defer file.Close()
+		reader := csv.NewReader(file)
+		rows, err := reader.ReadAll()
+		if err != nil {
+			return nil, fmt.Errorf("无法读取文件 %s: %v", filePath, err)
+		}
+		return rows, nil
 	}
 
-	uavSheet := uavFile.GetSheetList()[0]
-	rows, err := uavFile.GetRows(uavSheet)
+	// 读取 UAV 数据
+	rows, err := parseCSV(uavMapFile)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法读取无人机表格数据: %v", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
-
 	for _, row := range rows[1:] { // 从第二行开始读取
-		id := excelizeToInt(row[0])
-		//date := excelizeToInt(row[1])
-		x := excelizeToInt(row[1])
-		y := excelizeToInt(row[2])
-		FullPower := excelizeToInt(row[4])
-		//FullPower := 20
-		//uRget, _ := strconv.ParseFloat(row[5], 64)
-		uRget, _ := strconv.ParseFloat(row[3], 64)
-		upTime, _ := strconv.ParseFloat(row[6], 64)
-		downTime, _ := strconv.ParseFloat(row[7], 64)
-		uPow := excelizeToInt(row[5])
-		//uPow := 18
-		//remainingPower := excelizeToInt(row[1])
+		id := toInt(row[0])
+		x := toInt(row[1])
+		y := toInt(row[2])
+		fullPower := toInt(row[4])
+		uRget := toFloat(row[3])
+		upTime := toFloat(row[6])
+		downTime := toFloat(row[7])
+		uPow := toInt(row[5])
 
 		uav := &Drone{
 			Base: Base{
@@ -70,41 +75,31 @@ func LoadMapData(uavMapFile, workerMapFile, carMapFile, taskMapFile, chargeMapFi
 			date:           1,
 			UUID:           uuid.New().String(),
 			IsPublisher:    false,
-			RemainingPower: float64(uPow), //剩余电量移动距离
+			RemainingPower: float64(uPow),
 			UpTime:         upTime,
-			FullPower:      float64(FullPower),
-			URget:          float64(uRget),
+			FullPower:      float64(fullPower),
+			URget:          uRget,
 			DownTime:       downTime,
 			NeedCharge:     false,
 		}
-		//dates[date] = true
 		uuidAgent[uav.UUID] = uav
 		agents = append(agents, uav)
 		mapMatrix.AgentMap[y][x] = 1 // 1 表示无人机
 	}
 
-	// 读取 workerMap 数据
-	workerFile, err := excelize.OpenFile(workerMapFile)
+	// 读取 Worker 数据
+	rows, err = parseCSV(workerMapFile)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法打开工作人员表格文件: %v", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
+	for _, row := range rows[1:] {
+		id := toInt(row[0])
+		x := toInt(row[1])
+		y := toInt(row[2])
+		wRget := toFloat(row[3])
+		upTime := toFloat(row[4])
+		downTime := toFloat(row[5])
 
-	workerSheet := workerFile.GetSheetList()[0]
-	rows, err = workerFile.GetRows(workerSheet)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法读取工作人员表格数据: %v", err)
-	}
-
-	for _, row := range rows[1:] { // 从第二行开始读取
-		id := excelizeToInt(row[0])
-		//date := excelizeToInt(row[1])
-		x := excelizeToInt(row[1])
-		y := excelizeToInt(row[2])
-
-		wRget, _ := strconv.ParseFloat(row[3], 64)
-		upTime, _ := strconv.ParseFloat(row[4], 64)
-		downTime, _ := strconv.ParseFloat(row[5], 64)
-		//dates[date] = true
 		worker := &Worker{
 			Base: Base{
 				Id:       id,
@@ -122,28 +117,20 @@ func LoadMapData(uavMapFile, workerMapFile, carMapFile, taskMapFile, chargeMapFi
 		mapMatrix.AgentMap[y][x] = 2 // 2 表示工作人员
 	}
 
-	// 读取 carMap 数据
-	carFile, err := excelize.OpenFile(carMapFile)
+	// 读取 Car 数据
+	rows, err = parseCSV(carMapFile)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法打开汽车表格文件: %v", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
+	for _, row := range rows[1:] {
+		id := toInt(row[0])
+		x := toInt(row[1])
+		y := toInt(row[2])
+		cRget := toFloat(row[3])
+		upTime := toFloat(row[4])
+		downTime := toFloat(row[5])
+		chargePow := toFloat(row[6])
 
-	carSheet := carFile.GetSheetList()[0]
-	rows, err = carFile.GetRows(carSheet)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法读取汽车表格数据: %v", err)
-	}
-
-	for _, row := range rows[1:] { // 从第二行开始读取
-		id := excelizeToInt(row[0])
-		//date := excelizeToInt(row[1])
-		x := excelizeToInt(row[1])
-		y := excelizeToInt(row[2])
-		//cRget := excelizeToInt(row[4])
-		cRget, _ := strconv.ParseFloat(row[3], 64)
-		upTime, _ := strconv.ParseFloat(row[4], 64)
-		downTime, _ := strconv.ParseFloat(row[5], 64)
-		chargePow, _ := strconv.ParseFloat(row[6], 64)
 		car := &Car{
 			Base: Base{
 				Id:       id,
@@ -157,74 +144,64 @@ func LoadMapData(uavMapFile, workerMapFile, carMapFile, taskMapFile, chargeMapFi
 			ChargePow:   chargePow,
 			date:        1,
 		}
-		dates[1] = true
 		uuidAgent[car.UUID] = car
 		agents = append(agents, car)
 		mapMatrix.AgentMap[y][x] = 3 // 3 表示汽车
 	}
-
-	// 读取 taskMap 数据
-	taskFile, err := excelize.OpenFile(taskMapFile)
+	dates[1] = true
+	// 读取 Task 数据
+	rows, err = parseCSV(taskMapFile)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法打开任务表格文件: %v", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
+	for _, row := range rows[1:] {
+		id := toInt(row[0])
+		x := toInt(row[1])
+		y := toInt(row[2])
+		taskPow := toFloat(row[3])
 
-	taskSheet := taskFile.GetSheetList()[0]
-	rows, err = taskFile.GetRows(taskSheet)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法读取任务表格数据: %v", err)
-	}
-
-	for _, row := range rows[1:] { // 从第二行开始读取
-		id := excelizeToInt(row[0])
-		x := excelizeToInt(row[1])
-		y := excelizeToInt(row[2])
-		taskPow, _ := strconv.ParseFloat(row[3], 64)
-		taskpoint := TaskPoint{
+		taskPoint := TaskPoint{
 			Base: Base{
 				Id:       id,
 				Position: Position{X: x, Y: y},
 			},
-			Drones:  make([]DroneCollection, 0),
-			Workers: make([]Worker, 0),
-			Cars:    make([]Car, 0),
-			UpTime:  0,
 			CostPow: taskPow,
 		}
-
-		taskPoints[taskpoint.Id] = &taskpoint
+		taskPoints[taskPoint.Id] = &taskPoint
 		mapMatrix.TaskMap[y][x] = 1 // 1 表示任务
 	}
 
-	// 读取 chargeMap 数据
-	chargeFile, err := excelize.OpenFile(chargeMapFile)
+	// 读取 Charge 数据
+	rows, err = parseCSV(chargeMapFile)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法打开充电点表格文件: %v", err)
+		return nil, nil, nil, nil, nil, nil, err
 	}
+	for _, row := range rows[1:] {
+		id := toInt(row[0])
+		x := toInt(row[1])
+		y := toInt(row[2])
 
-	chargeSheet := chargeFile.GetSheetList()[0]
-	rows, err = chargeFile.GetRows(chargeSheet)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, fmt.Errorf("无法读取充电点表格数据: %v", err)
-	}
-
-	for _, row := range rows[1:] { // 从第二行开始读取
-		id := excelizeToInt(row[0])
-		x := excelizeToInt(row[1])
-		y := excelizeToInt(row[2])
-		//upTime := excelizeToInt(row[3])
 		chargePoint := ChargePoint{
 			Base: Base{
 				Id:       id,
 				Position: Position{X: x, Y: y},
 			},
-			UpTime: 0,
 		}
 		chargePoints[chargePoint.Id] = &chargePoint
 		mapMatrix.ChargeMap[y][x] = 1 // 1 表示充电点
-	}
 
+	}
 	return mapMatrix, agents, taskPoints, chargePoints, uuidAgent, dates, nil
+}
+
+func toInt(s string) int {
+	value, _ := strconv.Atoi(s)
+	return value
+}
+
+func toFloat(s string) float64 {
+	value, _ := strconv.ParseFloat(s, 64)
+	return value
 }
 
 func excelizeToInt(value string) int {
