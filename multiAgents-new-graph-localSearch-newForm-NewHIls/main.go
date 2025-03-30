@@ -21,7 +21,7 @@ func main() {
 	//name := "data/1.6data/test2.csv"
 	//name := "data/1.6data/test2.csv"
 	//name := "data/1.8data/test5min.csv"
-	name := "data/1.15data/testRealData.csv"
+	name := "data/1.18data/test.csv"
 	folers := core.DataProcess(name)
 	f, err := os.Open(name)
 	defer f.Close()
@@ -58,7 +58,7 @@ func main() {
 			//allDistance = 0.0
 			//pre := "data/random/20_20-80-30-90-30_13_20"
 			//pre := "data/Random_data1/" + folder.Name
-			pre := "./../1.15dataCSV/" + folder.Name
+			pre := "./../1.18dataCSV/" + folder.Name
 			_, allAgents, allTakPoints, allChargePoints, uuidAgent, dates, err = core.LoadMapData(pre+"/uavMap.csv", pre+"/workerMap.csv", pre+"/carMap.csv", pre+"/taskMap.csv", pre+"/chargeMap.csv")
 
 			if err != nil {

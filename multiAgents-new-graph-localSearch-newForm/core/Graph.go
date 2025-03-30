@@ -440,7 +440,7 @@ func (g *Graph) HILS() *Solution {
 	p2 := 4
 	p3 := 2 //扰乱程度
 	k := 1
-	maxIterations := 5000 // 根据需要设置
+	maxIterations := 1000 // 根据需要设置
 	for iter < maxIterations {
 		iter++
 

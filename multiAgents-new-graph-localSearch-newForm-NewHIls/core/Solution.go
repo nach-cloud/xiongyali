@@ -295,7 +295,6 @@ func (s *Solution) oneStarMoves() bool {
 	}
 	for u := range s2 {
 		// Remove u
-
 		// Find independent set I to add
 		I := s.findIndependentSetAfterRemoval(u)
 

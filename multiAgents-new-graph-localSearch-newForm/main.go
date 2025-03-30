@@ -40,7 +40,7 @@ func main() {
 		results := 0.0
 		FolerResults := make([]float64, 0)
 		println(folder.Name, "文件已经开始,当前decideTime", core.DecideTime, "decideCount", core.DecideCount)
-		all := 1
+		all := 10
 		for i := 1; i <= all; i++ {
 			start := time.Now()
 			println("第", i, "轮计算")

@@ -184,9 +184,9 @@ func BuildGraph(taskPoints map[int]*TaskPoint, drones []*Drone, cars []*Car, wor
 				node.Weight = (float64(changePosition) + 1*float64(len(taskPoints)+len(chargePoints))) / (float64(taskCompleteDecideTime + alpha))
 				graph.AddNode(drone.UUID, node)
 			}
-			if decidecount > 1 {
-				continue
-			}
+			//if decidecount > 1 {
+			//	continue
+			//}
 			node := GraphNode{
 				NodeType:  DroneToTask,
 				Drone:     drone,
@@ -463,18 +463,11 @@ func (g *Graph) getCommonNeighbors(node1Key, node2Key string) []string {
 func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 	start := time.Now()
 	isChange := false
-	removedNodes := make(map[string]struct{})
 
 	// 4. 初始化解（使用处理后的图）
 	s := NewSolution(g)
 	for so := range s1.solution {
 		s.addVertex(so)
-	}
-	// 添加预处理中找到的孤立节点
-	for nodeKey := range removedNodes {
-		if len(g.getNeighbors(nodeKey)) == 0 {
-			s.addVertex(nodeKey)
-		}
 	}
 
 	// 继续原有的初始化
@@ -490,9 +483,9 @@ func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 	flag := true
 	for flag {
 		flag1 := s.omegaImprovement()
-		flag2 := s.AAPMoves()
-		flag3 := s.oneStarMoves()
-		if !(flag1 || flag2 || flag3) {
+		//flag2 := s.AAPMoves()
+		//flag3 := s.oneStarMoves()
+		if !(flag1) {
 			break
 		}
 		for !s.isMaximal() {
@@ -503,14 +496,14 @@ func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 	// 5. 记录最优解
 	bestSolution := new(Solution)
 	copySolution(s, bestSolution)
-	localBestWeight := s.weight
+	localBestWeight := bestSolution.weight
 
 	// 6. 主迭代循环参数
 	iter := 0
 	maxUpdateIter := 0
-	maxNoImprovementIters := 500
+	maxNoImprovementIters := 10000
 	noImprovementCount := 0
-	maxIterations := 1000
+	maxIterations := 1000000
 
 	// 7. 自适应参数
 	perturbationStrength := 1
@@ -560,11 +553,6 @@ func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 		flag := true
 		for flag {
 			flag1 := nextSolution.omegaImprovement()
-			//flag2 := nextSolution.AAPMoves()
-			//if flag2 {
-			//	println("111")
-			//}
-			//flag3 := nextSolution.oneStarMoves()
 			if !(flag1) {
 				//flag = nextSolution.twoStarMoves()
 				break
@@ -578,7 +566,7 @@ func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 		acceptNewSolution := false
 		if nextSolution.weight > s.weight && !g.isVisited(nextSolution) {
 			acceptNewSolution = true
-			noImprovementCount = 0
+			noImprovementCount++
 		} else if float64(nextSolution.weight)/float64(s.weight) > acceptanceThreshold && !g.isVisited(nextSolution) {
 			// 接受稍差的解以增加多样性
 			acceptNewSolution = true
@@ -601,6 +589,7 @@ func (g *Graph) HILS(s1 *Solution) (*Solution, bool) {
 			if bestSolution.weight < s.weight {
 				copySolution(s, bestSolution)
 				maxUpdateIter = iter
+				noImprovementCount = 0
 				isChange = true
 				g.BestKnownWeight = float64(s.weight) // 添加这行
 			}

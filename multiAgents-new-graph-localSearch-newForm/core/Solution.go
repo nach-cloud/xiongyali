@@ -127,6 +127,7 @@ func (s *Solution) omegaImprovement() bool {
 			return true
 		}
 	}
+
 	return false
 }
 
