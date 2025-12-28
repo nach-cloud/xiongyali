@@ -49,7 +49,9 @@ func main() {
 			continue
 		}
 
-		fmt.Println(folder.Name+"文件已经开始, decideTime", core.DecideTime, "decideCount", core.DecideCount)
+		fmt.Println(folder.Name+"文件已经开始, decideTime", folder.DecideTime, "decideCount", folder.DecideCount)
+		core.DecideTime = folder.DecideTime
+		core.DecideCount = folder.DecideCount
 		runs := 10
 		var sumResult float64
 		var sumElapsed float64
@@ -106,6 +108,14 @@ func main() {
 
 					res := engine.Decide(step, dayIndex, taskPoints, chargePoints, agents)
 					completeTaskCount += len(res.CompletedTaskIDs)
+					for _, ac := range res.Actions {
+						if ac.ActionType == core.DroneWorkerToTask {
+							println(ac.Drone.Id, "无人机与", ac.Worker.Id, "工作人员结成了联盟，完成任务", ac.TaskID, "消耗时间为", ac.Time, "剩余电量", ac.Drone.RemainingPower)
+						} else if ac.ActionType == core.DroneCarToChargePoint {
+							println(ac.Drone.Id, "无人机与", ac.Car.Id, "汽车结成了联盟，去充电点", ac.ChargePointId, "消耗时间为", ac.Time, "剩余电量", ac.Drone.RemainingPower)
+
+						}
+					}
 					actions = append(actions, res.Actions...)
 				}
 
