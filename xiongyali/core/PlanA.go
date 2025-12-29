@@ -49,6 +49,9 @@ type PlanAEngine struct {
 
 	// workerCommitTask maps worker UUID -> committed task id.
 	workerCommitTask map[string]int
+
+	// carPlan tracks planned charge targets across decision steps.
+	carPlan map[string]*CarPlanEntry
 }
 
 // NewPlanAEngine constructs the algorithm engine.
@@ -66,6 +69,7 @@ func NewPlanAEngine(cfg PlanAConfig) *PlanAEngine {
 		cfg:              cfg,
 		droneCommitTask:  make(map[string]int),
 		workerCommitTask: make(map[string]int),
+		carPlan:          make(map[string]*CarPlanEntry),
 	}
 }
 
@@ -84,6 +88,12 @@ type chargeIntent struct {
 	meetN    int
 }
 
+type CarPlanEntry struct {
+	TargetChargeID int
+	Fixed          bool
+	LastUpdateStep int
+}
+
 // Decide runs “方案A” for one decision step.
 // Inputs:
 //   - step: 1..DecideCount
@@ -95,7 +105,8 @@ type chargeIntent struct {
 // NOTE: This function does NOT call updateAgent() or chargeTask();
 // it only decides assignments and returns Actions.
 func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, chargePoints map[int]*ChargePoint, agents []Agent) PlanAResult {
-	drones, workers, cars := collectIdleAgents(agents)
+	drones, workers, cars := collectAgents(agents)
+	carTarget, chargeList := e.updateCarPlan(step, cars, chargePoints)
 	if len(taskPoints) == 0 || len(workers) == 0 || len(drones) == 0 {
 		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
 	}
@@ -111,15 +122,14 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 
 	costUT := e.buildCostUT(tasksList, workers, drones, assignedTasks, taskToWorker)
 	droneToTaskIdx := buildDroneToTaskIdx(assignedTasks, costUT, e.cfg.BigM)
-	carTarget, chargeList := buildCarTarget(cars, chargePoints)
-	finalDroneTask, droneCharge := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
-	carToChargeID := e.assignCarsToCharges(droneCharge, drones, cars, chargeList)
-	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, taskToWorker, carToChargeID)
+	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
+	carToChargeID, droneToCar := e.assignCarsToCharges(droneCharge, droneWeights, drones, cars, chargeList, carTarget)
+	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, taskToWorker, carToChargeID, droneToCar)
 
 	return PlanAResult{Actions: actions, CompletedTaskIDs: completedIDs}
 }
 
-func collectIdleAgents(agents []Agent) ([]*Drone, []*Worker, []*Car) {
+func collectAgents(agents []Agent) ([]*Drone, []*Worker, []*Car) {
 	drones := make([]*Drone, 0)
 	workers := make([]*Worker, 0)
 	cars := make([]*Car, 0)
@@ -137,7 +147,7 @@ func collectIdleAgents(agents []Agent) ([]*Drone, []*Worker, []*Car) {
 				workers = append(workers, v)
 			}
 		case *Car:
-			if v != nil && v.Status == Idle {
+			if v != nil {
 				cars = append(cars, v)
 			}
 		}
@@ -309,7 +319,7 @@ func buildDroneToTaskIdx(assignedTasks []int, costUT [][]float64, bigM float64) 
 	return droneToTaskIdx
 }
 
-func buildCarTarget(cars []*Car, chargePoints map[int]*ChargePoint) (map[int]int, []*ChargePoint) {
+func (e *PlanAEngine) updateCarPlan(step int, cars []*Car, chargePoints map[int]*ChargePoint) (map[int]int, []*ChargePoint) {
 	carTarget := make(map[int]int)
 	chargeList := make([]*ChargePoint, 0, len(chargePoints))
 	for _, ch := range chargePoints {
@@ -321,28 +331,50 @@ func buildCarTarget(cars []*Car, chargePoints map[int]*ChargePoint) (map[int]int
 		if c == nil || len(chargeList) == 0 {
 			continue
 		}
-		bestID := chargeList[0].Id
-		best := math.MaxFloat64
-		for _, ch := range chargeList {
-			dist := Distance(c.X, c.Y, ch.X, ch.Y)
-			if dist < best {
-				best = dist
-				bestID = ch.Id
-			}
-		}
-		carTarget[ci] = bestID
+		entry := e.ensureCarPlanEntry(c, chargePoints, chargeList)
+		entry.Fixed = c.Status != Idle
+		entry.LastUpdateStep = step
+		carTarget[ci] = entry.TargetChargeID
 	}
 	return carTarget, chargeList
 }
 
-func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, droneToTaskIdx map[int]int, carTarget map[int]int, chargePoints map[int]*ChargePoint) (map[int]int, map[int]chargeIntent) {
-	finalDroneTask := make(map[int]int)
-	droneCharge := make(map[int]chargeIntent)
+func (e *PlanAEngine) ensureCarPlanEntry(car *Car, chargePoints map[int]*ChargePoint, chargeList []*ChargePoint) *CarPlanEntry {
+	entry, ok := e.carPlan[car.UUID]
+	if !ok {
+		entry = &CarPlanEntry{}
+		e.carPlan[car.UUID] = entry
+	}
+	if entry.TargetChargeID == 0 {
+		entry.TargetChargeID = nearestChargeID(car, chargeList)
+		return entry
+	}
+	if _, exists := chargePoints[entry.TargetChargeID]; !exists {
+		entry.TargetChargeID = nearestChargeID(car, chargeList)
+	}
+	return entry
+}
 
-	bestMeet := func(d *Drone) (best chargeIntent, ok bool) {
-		best.meetN = math.MaxInt
-		best.carIdx = -1
-		best.chargeID = -1
+func nearestChargeID(car *Car, chargeList []*ChargePoint) int {
+	bestID := chargeList[0].Id
+	best := math.MaxFloat64
+	for _, ch := range chargeList {
+		dist := Distance(car.X, car.Y, ch.X, ch.Y)
+		if dist < best {
+			best = dist
+			bestID = ch.Id
+		}
+	}
+	return bestID
+}
+
+func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, droneToTaskIdx map[int]int, carTarget map[int]int, chargePoints map[int]*ChargePoint) (map[int]int, map[int]struct{}, map[int]float64) {
+	finalDroneTask := make(map[int]int)
+	droneCharge := make(map[int]struct{})
+	droneWeights := make(map[int]float64)
+
+	bestMeet := func(d *Drone) (int, bool) {
+		best := math.MaxInt
 		for ci, c := range cars {
 			chID, has := carTarget[ci]
 			if !has {
@@ -353,16 +385,14 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 				continue
 			}
 			meet := nMeet(d, c, ch)
-			if meet < best.meetN {
-				best.meetN = meet
-				best.carIdx = ci
-				best.chargeID = chID
+			if meet < best {
+				best = meet
 			}
 		}
-		if best.carIdx >= 0 {
+		if best < math.MaxInt {
 			return best, true
 		}
-		return best, false
+		return 0, false
 	}
 
 	committedTaskForDrone := func(d *Drone) (int, bool) {
@@ -415,69 +445,139 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		if _, alreadyTask := finalDroneTask[di]; alreadyTask {
 			continue
 		}
-		if _, alreadyCharge := droneCharge[di]; alreadyCharge {
-			continue
-		}
-		deltaF := deltaFeasibleTasks(d, tasksList)
-		intent, ok := bestMeet(d)
-		if ok && deltaF > 0 && intent.meetN <= e.cfg.ChargeMeetWindowSteps {
-			droneCharge[di] = intent
+		deltaF := float64(deltaFeasibleTasks(d, tasksList))
+		meetN, ok := bestMeet(d)
+		if ok && deltaF > 0 && meetN <= e.cfg.ChargeMeetWindowSteps {
+			droneCharge[di] = struct{}{}
+			droneWeights[di] = deltaF
 		}
 	}
 
-	return finalDroneTask, droneCharge
+	return finalDroneTask, droneCharge, droneWeights
 }
 
-func (e *PlanAEngine) assignCarsToCharges(droneCharge map[int]chargeIntent, drones []*Drone, cars []*Car, chargeList []*ChargePoint) map[int]int {
+func (e *PlanAEngine) assignCarsToCharges(droneCharge map[int]struct{}, droneWeights map[int]float64, drones []*Drone, cars []*Car, chargeList []*ChargePoint, carTarget map[int]int) (map[int]int, map[int]int) {
 	carToChargeID := make(map[int]int)
+	droneToCar := make(map[int]int)
 	if len(droneCharge) == 0 || len(cars) == 0 || len(chargeList) == 0 {
-		return carToChargeID
+		return carToChargeID, droneToCar
 	}
 
-	dronesWantCharge := make([]int, 0, len(droneCharge))
-	for di := range droneCharge {
-		dronesWantCharge = append(dronesWantCharge, di)
-	}
-
-	cN := len(cars)
-	pN := len(chargeList)
-	benefitCost := make([][]float64, cN)
-	for ci := 0; ci < cN; ci++ {
-		benefitCost[ci] = make([]float64, pN)
-		for pi := 0; pi < pN; pi++ {
-			benefitCost[ci][pi] = 0
+	for iter := 0; iter < 3; iter++ {
+		targetPoints := chargePointByID(chargeList)
+		droneToCar = assignDronesToCars(droneCharge, drones, cars, targetPoints, carTarget)
+		changed := updateCarTargets(droneToCar, droneWeights, drones, cars, chargeList, carTarget, e.carPlan)
+		if !changed {
+			break
 		}
 	}
-	for ci, c := range cars {
-		for pi, ch := range chargeList {
-			if c == nil || ch == nil {
-				benefitCost[ci][pi] = 0
+
+	for ci, chID := range carTarget {
+		carToChargeID[ci] = chID
+		if ci >= 0 && ci < len(cars) && cars[ci] != nil {
+			entry := e.carPlan[cars[ci].UUID]
+			if entry != nil {
+				entry.TargetChargeID = chID
+			}
+		}
+	}
+	return carToChargeID, droneToCar
+}
+
+func chargePointByID(chargeList []*ChargePoint) map[int]*ChargePoint {
+	chargeByID := make(map[int]*ChargePoint, len(chargeList))
+	for _, ch := range chargeList {
+		if ch != nil {
+			chargeByID[ch.Id] = ch
+		}
+	}
+	return chargeByID
+}
+
+func assignDronesToCars(droneCharge map[int]struct{}, drones []*Drone, cars []*Car, chargeByID map[int]*ChargePoint, carTarget map[int]int) map[int]int {
+	droneToCar := make(map[int]int)
+	for di := range droneCharge {
+		d := drones[di]
+		if d == nil {
+			continue
+		}
+		bestCar := -1
+		bestMeet := math.MaxInt
+		for ci, c := range cars {
+			if c == nil {
 				continue
 			}
-			count := 0
-			for _, di := range dronesWantCharge {
+			chID, ok := carTarget[ci]
+			if !ok {
+				continue
+			}
+			ch := chargeByID[chID]
+			if ch == nil {
+				continue
+			}
+			meet := nMeet(d, c, ch)
+			if meet < bestMeet {
+				bestMeet = meet
+				bestCar = ci
+			}
+		}
+		if bestCar >= 0 {
+			droneToCar[di] = bestCar
+		}
+	}
+	return droneToCar
+}
+
+func updateCarTargets(droneToCar map[int]int, droneWeights map[int]float64, drones []*Drone, cars []*Car, chargeList []*ChargePoint, carTarget map[int]int, carPlan map[string]*CarPlanEntry) bool {
+	changed := false
+	for ci, c := range cars {
+		if c == nil {
+			continue
+		}
+		entry := carPlan[c.UUID]
+		if entry != nil && entry.Fixed {
+			continue
+		}
+		assignedDrones := make([]int, 0)
+		for di, carIdx := range droneToCar {
+			if carIdx == ci {
+				assignedDrones = append(assignedDrones, di)
+			}
+		}
+		if len(assignedDrones) == 0 {
+			continue
+		}
+
+		bestID := carTarget[ci]
+		bestCost := math.Inf(1)
+		for _, ch := range chargeList {
+			if ch == nil {
+				continue
+			}
+			cost := 0.0
+			for _, di := range assignedDrones {
 				d := drones[di]
 				if d == nil {
 					continue
 				}
 				meetN := nMeet(d, c, ch)
-				if meetN <= e.cfg.ChargeMeetWindowSteps {
-					count++
-				}
+				weight := droneWeights[di]
+				cost += weight * float64(meetN)
 			}
-			benefitCost[ci][pi] = -float64(count)
+			if cost < bestCost {
+				bestCost = cost
+				bestID = ch.Id
+			}
+		}
+		if bestID != carTarget[ci] {
+			carTarget[ci] = bestID
+			changed = true
 		}
 	}
-	carAssign := hungarianMin(benefitCost, e.cfg.BigM)
-	for ci, pi := range carAssign {
-		if pi >= 0 && pi < len(chargeList) {
-			carToChargeID[ci] = chargeList[pi].Id
-		}
-	}
-	return carToChargeID
+	return changed
 }
 
-func (e *PlanAEngine) buildActions(step int, date int, drones []*Drone, workers []*Worker, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, chargePoints map[int]*ChargePoint, finalDroneTask map[int]int, droneCharge map[int]chargeIntent, taskToWorker map[int]int, carToChargeID map[int]int) ([]Action, []int) {
+func (e *PlanAEngine) buildActions(step int, date int, drones []*Drone, workers []*Worker, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, chargePoints map[int]*ChargePoint, finalDroneTask map[int]int, droneCharge map[int]struct{}, taskToWorker map[int]int, carToChargeID map[int]int, droneToCar map[int]int) ([]Action, []int) {
 	actions := make([]Action, 0)
 	completedIDs := make([]int, 0)
 
@@ -524,15 +624,18 @@ func (e *PlanAEngine) buildActions(step int, date int, drones []*Drone, workers 
 		completedIDs = append(completedIDs, t.Id)
 	}
 
-	for di, intent := range droneCharge {
+	for di := range droneCharge {
 		d := drones[di]
 		if d == nil || len(cars) == 0 {
 			continue
 		}
-		chosenCarIdx := intent.carIdx
-		chosenChargeID := intent.chargeID
-		if chID, ok := carToChargeID[chosenCarIdx]; ok {
-			chosenChargeID = chID
+		chosenCarIdx, ok := droneToCar[di]
+		if !ok {
+			continue
+		}
+		chosenChargeID, ok := carToChargeID[chosenCarIdx]
+		if !ok {
+			continue
 		}
 		ch := chargePoints[chosenChargeID]
 		if ch == nil {
@@ -599,8 +702,7 @@ func (e *PlanAEngine) decideOnlyCharging(step int, date int, drones []*Drone, ca
 			if c == nil {
 				continue
 			}
-			// nearest charge for this car
-			chID, _ := FoundNearChargePoisition(c.X, c.Y, chargePoints)
+			chID := e.carPlanChargeTarget(c, chargePoints, chargeList)
 			ch := chargePoints[chID]
 			if ch == nil {
 				continue
@@ -644,6 +746,20 @@ func (e *PlanAEngine) decideOnlyCharging(step int, date int, drones []*Drone, ca
 		bestCh.Status = 1
 	}
 	return PlanAResult{Actions: actions}
+}
+
+func (e *PlanAEngine) carPlanChargeTarget(car *Car, chargePoints map[int]*ChargePoint, chargeList []*ChargePoint) int {
+	if car == nil || len(chargeList) == 0 {
+		return 0
+	}
+	entry := e.carPlan[car.UUID]
+	if entry == nil {
+		return nearestChargeID(car, chargeList)
+	}
+	if _, ok := chargePoints[entry.TargetChargeID]; ok {
+		return entry.TargetChargeID
+	}
+	return nearestChargeID(car, chargeList)
 }
 
 // feasibleDroneTask implements constraint (3) using your data model.
