@@ -33,7 +33,7 @@ var uuidAgent map[string]core.Agent
 //  - call runPlanA() from your existing main.
 
 func main() {
-	name := "result/4.11result/testDataAllTask.csv"
+	name := "result/4.11result/testChargeChangeTask.csv"
 	folders := core.DataProcess(name)
 	f, err := os.Open(name)
 	if err != nil {
