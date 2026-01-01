@@ -2,6 +2,7 @@ package core
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 )
 
@@ -82,12 +83,6 @@ type PlanAResult struct {
 	CompletedTaskIDs []int
 }
 
-type chargeIntent struct {
-	carIdx   int
-	chargeID int
-	meetN    int
-}
-
 type CarPlanEntry struct {
 	TargetChargeID int
 	Fixed          bool
@@ -121,10 +116,16 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	}
 
 	costUT := e.buildCostUT(tasksList, workers, drones, assignedTasks, taskToWorker)
-	droneToTaskIdx := buildDroneToTaskIdx(assignedTasks, costUT, e.cfg.BigM)
+	seed := buildSeedTriples(assignedTasks, taskToWorker, costUT, e.cfg.BigM)
+	gaTaskToWorker := taskToWorker
+	droneToTaskIdx := seed.droneToTask
+	if seed.len() > 0 {
+		rng := rand.New(rand.NewSource(int64(step*1000 + date)))
+		droneToTaskIdx, gaTaskToWorker = e.runTripleGA(seed, tasksList, workers, drones, chargeList, rng)
+	}
 	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
 	carToChargeID, droneToCar := e.assignCarsToCharges(droneCharge, droneWeights, drones, cars, chargeList, carTarget)
-	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, taskToWorker, carToChargeID, droneToCar)
+	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, gaTaskToWorker, carToChargeID, droneToCar)
 
 	return PlanAResult{Actions: actions, CompletedTaskIDs: completedIDs}
 }
@@ -303,10 +304,21 @@ func (e *PlanAEngine) buildCostUT(tasksList []*TaskPoint, workers []*Worker, dro
 	return costUT
 }
 
-func buildDroneToTaskIdx(assignedTasks []int, costUT [][]float64, bigM float64) map[int]int {
+type seedTriples struct {
+	taskOrder   []int
+	seedWperm   []int
+	seedDperm   []int
+	droneToTask map[int]int
+}
+
+func (s seedTriples) len() int {
+	return len(s.taskOrder)
+}
+
+func buildSeedTriples(assignedTasks []int, taskToWorker map[int]int, costUT [][]float64, bigM float64) seedTriples {
 	tN := len(assignedTasks)
 	utAssign := hungarianMin(costUT, bigM)
-	droneToTaskIdx := make(map[int]int)
+	droneToTask := make(map[int]int)
 	for i, k := range utAssign {
 		if k < 0 || k >= tN {
 			continue
@@ -314,9 +326,473 @@ func buildDroneToTaskIdx(assignedTasks []int, costUT [][]float64, bigM float64) 
 		if costUT[i][k] >= bigM/2 {
 			continue
 		}
-		droneToTaskIdx[i] = assignedTasks[k]
+		droneToTask[i] = assignedTasks[k]
+	}
+	taskToDrone := make(map[int]int)
+	for di, taskIdx := range droneToTask {
+		taskToDrone[taskIdx] = di
+	}
+
+	taskOrder := make([]int, 0)
+	seedW := make([]int, 0)
+	seedD := make([]int, 0)
+	for _, tIdx := range assignedTasks {
+		workerIdx, ok := taskToWorker[tIdx]
+		if !ok {
+			continue
+		}
+		droneIdx, ok := taskToDrone[tIdx]
+		if !ok {
+			continue
+		}
+		taskOrder = append(taskOrder, tIdx)
+		seedW = append(seedW, workerIdx)
+		seedD = append(seedD, droneIdx)
+	}
+
+	return seedTriples{
+		taskOrder:   taskOrder,
+		seedWperm:   seedW,
+		seedDperm:   seedD,
+		droneToTask: droneToTask,
+	}
+}
+
+type gaFitness struct {
+	Nmax int
+	Navg float64
+	Esum float64
+}
+
+type gaIndividual struct {
+	Wperm   []int
+	Dperm   []int
+	fitness gaFitness
+	valid   bool
+}
+
+type gaPrecompute struct {
+	tasks        []int
+	drones       []int
+	workers      []int
+	droneIndex   map[int]int
+	workerIndex  map[int]int
+	distToCharge []float64
+	eneed        [][]float64
+	feasible     [][]bool
+	td           [][]int
+	tw           [][]int
+}
+
+func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, rng *rand.Rand) (map[int]int, map[int]int) {
+	precompute := buildGAPrecompute(seed, tasksList, workers, drones, chargeList)
+	if len(precompute.tasks) == 0 {
+		return seed.droneToTask, buildTaskToWorker(seed.taskOrder, seed.seedWperm)
+	}
+
+	popSize := 30
+	generations := 20
+	stallLimit := 5
+	pop := initPopulation(seed, precompute, rng, popSize)
+	best := bestIndividual(pop)
+	stall := 0
+
+	for gen := 0; gen < generations; gen++ {
+		next := make([]gaIndividual, 0, popSize)
+		next = append(next, best)
+
+		for len(next) < popSize {
+			parentA := tournamentSelect(pop, rng, 3)
+			parentB := tournamentSelect(pop, rng, 3)
+			childW := pmx(parentA.Wperm, parentB.Wperm, rng)
+			childD := pmx(parentA.Dperm, parentB.Dperm, rng)
+			child := gaIndividual{Wperm: childW, Dperm: childD}
+			if !repairDronePerm(child.Dperm, seed.seedDperm, precompute) {
+				continue
+			}
+			mutateIndividual(&child, precompute, rng, 0.2, 0.2)
+			child = evaluateIndividual(child, precompute)
+			if child.valid {
+				next = append(next, child)
+			}
+		}
+
+		pop = next
+		newBest := bestIndividual(pop)
+		if betterFitness(newBest.fitness, best.fitness) {
+			best = newBest
+			stall = 0
+		} else {
+			stall++
+		}
+		if stall >= stallLimit {
+			break
+		}
+	}
+
+	return buildDroneToTask(seed.taskOrder, best.Dperm), buildTaskToWorker(seed.taskOrder, best.Wperm)
+}
+
+func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint) gaPrecompute {
+	taskOrder := append([]int(nil), seed.taskOrder...)
+	droneList := append([]int(nil), seed.seedDperm...)
+	workerList := append([]int(nil), seed.seedWperm...)
+
+	droneIndex := make(map[int]int)
+	for i, di := range droneList {
+		droneIndex[di] = i
+	}
+	workerIndex := make(map[int]int)
+	for i, wi := range workerList {
+		workerIndex[wi] = i
+	}
+
+	distToCharge := make([]float64, len(taskOrder))
+	for r, tIdx := range taskOrder {
+		t := tasksList[tIdx]
+		if t == nil || len(chargeList) == 0 {
+			distToCharge[r] = 0
+			continue
+		}
+		best := math.MaxFloat64
+		for _, ch := range chargeList {
+			if ch == nil {
+				continue
+			}
+			dist := Distance(t.X, t.Y, ch.X, ch.Y)
+			if dist < best {
+				best = dist
+			}
+		}
+		distToCharge[r] = best
+	}
+
+	eneed := make([][]float64, len(droneList))
+	feasible := make([][]bool, len(droneList))
+	td := make([][]int, len(droneList))
+	for dIdx, droneID := range droneList {
+		d := drones[droneID]
+		eneed[dIdx] = make([]float64, len(taskOrder))
+		feasible[dIdx] = make([]bool, len(taskOrder))
+		td[dIdx] = make([]int, len(taskOrder))
+		for r, tIdx := range taskOrder {
+			t := tasksList[tIdx]
+			if d == nil || t == nil {
+				eneed[dIdx][r] = math.Inf(1)
+				feasible[dIdx][r] = false
+				td[dIdx][r] = math.MaxInt / 4
+				continue
+			}
+			dist := Distance(d.X, d.Y, t.X, t.Y)
+			need := dist + t.CostPow + distToCharge[r]
+			eneed[dIdx][r] = need
+			feasible[dIdx][r] = d.RemainingPower >= need
+			td[dIdx][r] = stepsTo(d.Position, t.Position, d.URget)
+		}
+	}
+
+	tw := make([][]int, len(workerList))
+	for wIdx, workerID := range workerList {
+		w := workers[workerID]
+		tw[wIdx] = make([]int, len(taskOrder))
+		for r, tIdx := range taskOrder {
+			t := tasksList[tIdx]
+			if w == nil || t == nil {
+				tw[wIdx][r] = math.MaxInt / 4
+				continue
+			}
+			tw[wIdx][r] = stepsTo(w.Position, t.Position, w.WRget)
+		}
+	}
+
+	return gaPrecompute{
+		tasks:        taskOrder,
+		drones:       droneList,
+		workers:      workerList,
+		droneIndex:   droneIndex,
+		workerIndex:  workerIndex,
+		distToCharge: distToCharge,
+		eneed:        eneed,
+		feasible:     feasible,
+		td:           td,
+		tw:           tw,
+	}
+}
+
+func initPopulation(seed seedTriples, precompute gaPrecompute, rng *rand.Rand, popSize int) []gaIndividual {
+	pop := make([]gaIndividual, 0, popSize)
+	seedInd := gaIndividual{
+		Wperm: append([]int(nil), seed.seedWperm...),
+		Dperm: append([]int(nil), seed.seedDperm...),
+	}
+	seedInd = evaluateIndividual(seedInd, precompute)
+	if seedInd.valid {
+		pop = append(pop, seedInd)
+	}
+
+	tries := 0
+	for len(pop) < popSize && tries < popSize*10 {
+		tries++
+		ind := gaIndividual{
+			Wperm: append([]int(nil), seed.seedWperm...),
+			Dperm: append([]int(nil), seed.seedDperm...),
+		}
+		perturbIndividual(&ind, precompute, rng, 3)
+		ind = evaluateIndividual(ind, precompute)
+		if ind.valid {
+			pop = append(pop, ind)
+		}
+	}
+	if len(pop) == 0 {
+		return []gaIndividual{seedInd}
+	}
+	return pop
+}
+
+func perturbIndividual(ind *gaIndividual, precompute gaPrecompute, rng *rand.Rand, swaps int) {
+	for i := 0; i < swaps; i++ {
+		if rng.Float64() < 0.5 {
+			swapPositions(ind.Wperm, rng)
+			continue
+		}
+		swapFeasibleDronePositions(ind.Dperm, precompute, rng, 5)
+	}
+}
+
+func evaluateIndividual(ind gaIndividual, precompute gaPrecompute) gaIndividual {
+	if len(ind.Dperm) != len(precompute.tasks) || len(ind.Wperm) != len(precompute.tasks) {
+		ind.valid = false
+		return ind
+	}
+	nmax := 0
+	nsum := 0
+	esum := 0.0
+	for r := range precompute.tasks {
+		dIdx := ind.Dperm[r]
+		wIdx := ind.Wperm[r]
+		dRow, okD := precompute.droneIndex[dIdx]
+		wRow, okW := precompute.workerIndex[wIdx]
+		if !okD || !okW || !precompute.feasible[dRow][r] {
+			ind.valid = false
+			return ind
+		}
+		nr := precompute.td[dRow][r]
+		if precompute.tw[wRow][r] > nr {
+			nr = precompute.tw[wRow][r]
+		}
+		if nr > nmax {
+			nmax = nr
+		}
+		nsum += nr
+		esum += precompute.eneed[dRow][r]
+	}
+	ind.fitness = gaFitness{
+		Nmax: nmax,
+		Navg: float64(nsum) / float64(len(precompute.tasks)),
+		Esum: esum,
+	}
+	ind.valid = true
+	return ind
+}
+
+func betterFitness(a, b gaFitness) bool {
+	if a.Nmax != b.Nmax {
+		return a.Nmax < b.Nmax
+	}
+	if a.Navg != b.Navg {
+		return a.Navg < b.Navg
+	}
+	return a.Esum < b.Esum
+}
+
+func bestIndividual(pop []gaIndividual) gaIndividual {
+	best := pop[0]
+	for i := 1; i < len(pop); i++ {
+		if betterFitness(pop[i].fitness, best.fitness) {
+			best = pop[i]
+		}
+	}
+	return best
+}
+
+func tournamentSelect(pop []gaIndividual, rng *rand.Rand, k int) gaIndividual {
+	best := pop[rng.Intn(len(pop))]
+	for i := 1; i < k; i++ {
+		cand := pop[rng.Intn(len(pop))]
+		if betterFitness(cand.fitness, best.fitness) {
+			best = cand
+		}
+	}
+	return best
+}
+
+func pmx(parentA []int, parentB []int, rng *rand.Rand) []int {
+	n := len(parentA)
+	child := make([]int, n)
+	for i := range child {
+		child[i] = -1
+	}
+	c1 := rng.Intn(n)
+	c2 := rng.Intn(n)
+	if c1 > c2 {
+		c1, c2 = c2, c1
+	}
+
+	for i := c1; i <= c2; i++ {
+		child[i] = parentA[i]
+	}
+
+	for i := c1; i <= c2; i++ {
+		val := parentB[i]
+		if contains(child, val) {
+			continue
+		}
+		pos := i
+		for {
+			mapped := parentA[pos]
+			pos = indexOf(parentB, mapped)
+			if child[pos] == -1 {
+				child[pos] = val
+				break
+			}
+		}
 	}
 	return droneToTaskIdx
+}
+
+	for i := 0; i < n; i++ {
+		if child[i] == -1 {
+			child[i] = parentB[i]
+		}
+	}
+	return child
+}
+
+func repairDronePerm(dperm []int, seed []int, precompute gaPrecompute) bool {
+	posByDrone := make(map[int]int)
+	for i, d := range dperm {
+		posByDrone[d] = i
+	}
+
+	for r := range precompute.tasks {
+		if feasibleDroneAt(dperm[r], r, precompute) {
+			continue
+		}
+		swapped := false
+		for s := 0; s < len(dperm); s++ {
+			if s == r {
+				continue
+			}
+			if feasibleDroneAt(dperm[s], r, precompute) && feasibleDroneAt(dperm[r], s, precompute) {
+				dperm[r], dperm[s] = dperm[s], dperm[r]
+				posByDrone[dperm[r]] = r
+				posByDrone[dperm[s]] = s
+				swapped = true
+				break
+			}
+		}
+		if swapped {
+			continue
+		}
+		if r >= len(seed) {
+			return false
+		}
+		target := seed[r]
+		pos, ok := posByDrone[target]
+		if !ok {
+			return false
+		}
+		dperm[r], dperm[pos] = dperm[pos], dperm[r]
+		posByDrone[dperm[r]] = r
+		posByDrone[dperm[pos]] = pos
+		if !feasibleDroneAt(dperm[r], r, precompute) {
+			return false
+		}
+	}
+	return true
+}
+
+func feasibleDroneAt(droneID int, taskPos int, precompute gaPrecompute) bool {
+	dRow, ok := precompute.droneIndex[droneID]
+	if !ok {
+		return false
+	}
+	return precompute.feasible[dRow][taskPos]
+}
+
+func mutateIndividual(ind *gaIndividual, precompute gaPrecompute, rng *rand.Rand, pmW float64, pmD float64) {
+	if rng.Float64() < pmW {
+		swapPositions(ind.Wperm, rng)
+	}
+	if rng.Float64() < pmD {
+		swapFeasibleDronePositions(ind.Dperm, precompute, rng, 5)
+	}
+}
+
+func swapPositions(perm []int, rng *rand.Rand) {
+	if len(perm) < 2 {
+		return
+	}
+	i := rng.Intn(len(perm))
+	j := rng.Intn(len(perm))
+	perm[i], perm[j] = perm[j], perm[i]
+}
+
+func swapFeasibleDronePositions(perm []int, precompute gaPrecompute, rng *rand.Rand, tries int) {
+	if len(perm) < 2 {
+		return
+	}
+	for attempt := 0; attempt < tries; attempt++ {
+		i := rng.Intn(len(perm))
+		j := rng.Intn(len(perm))
+		if i == j {
+			continue
+		}
+		if feasibleDroneAt(perm[i], j, precompute) && feasibleDroneAt(perm[j], i, precompute) {
+			perm[i], perm[j] = perm[j], perm[i]
+			return
+		}
+	}
+}
+
+func buildDroneToTask(taskOrder []int, dperm []int) map[int]int {
+	droneToTask := make(map[int]int)
+	for r, taskIdx := range taskOrder {
+		if r >= len(dperm) {
+			break
+		}
+		droneToTask[dperm[r]] = taskIdx
+	}
+	return droneToTask
+}
+
+func buildTaskToWorker(taskOrder []int, wperm []int) map[int]int {
+	taskToWorker := make(map[int]int)
+	for r, taskIdx := range taskOrder {
+		if r >= len(wperm) {
+			break
+		}
+		taskToWorker[taskIdx] = wperm[r]
+	}
+	return taskToWorker
+}
+
+func contains(list []int, value int) bool {
+	for _, v := range list {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+func indexOf(list []int, value int) int {
+	for i, v := range list {
+		if v == value {
+			return i
+		}
+	}
+	return -1
 }
 
 func (e *PlanAEngine) updateCarPlan(step int, cars []*Car, chargePoints map[int]*ChargePoint) (map[int]int, []*ChargePoint) {
@@ -585,7 +1061,10 @@ func (e *PlanAEngine) buildActions(step int, date int, drones []*Drone, workers 
 	for di, tIdx := range finalDroneTask {
 		d := drones[di]
 		t := tasksList[tIdx]
-		wIdx := taskToWorker[tIdx]
+		wIdx, ok := taskToWorker[tIdx]
+		if !ok {
+			continue
+		}
 		w := workers[wIdx]
 		if d == nil || w == nil || t == nil {
 			continue
