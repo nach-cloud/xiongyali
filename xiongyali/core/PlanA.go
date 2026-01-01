@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -121,7 +122,7 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	droneToTaskIdx := seed.droneToTask
 	if seed.len() > 0 {
 		rng := rand.New(rand.NewSource(int64(step*1000 + date)))
-		horizon := DecideCount - step
+		horizon := 2
 		if horizon < 0 {
 			horizon = 0
 		}
@@ -400,9 +401,22 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 	stallLimit := 5
 	pop := initPopulation(seed, precompute, rng, popSize)
 	best := bestIndividual(pop)
+	seedInd := gaIndividual{Wperm: append([]int(nil), seed.seedWperm...), Dperm: append([]int(nil), seed.seedDperm...)}
+	seedInd = evaluateIndividual(seedInd, precompute)
+
+	uniq := countUnique(pop)
+	fmt.Printf("[GA][step=%d] L=%d pop=%d uniq=%d seed=%+v best=%+v\n",
+		/* step你没有传进runTripleGA，可先打印date/horizon或先不打印step */
+		0, len(precompute.tasks), len(pop), uniq, seedInd.fitness, best.fitness)
+
 	stall := 0
 
 	for gen := 0; gen < generations; gen++ {
+		attempt := 0
+		dropRepair := 0
+		dropInvalid := 0
+		accept := 0
+
 		next := make([]gaIndividual, 0, popSize)
 		next = append(next, best)
 
@@ -423,7 +437,14 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 		}
 
 		pop = next
+
 		newBest := bestIndividual(pop)
+		uniq := countUnique(pop)
+		diffW := diffCount(best.Wperm, seed.seedWperm)
+		diffD := diffCount(best.Dperm, seed.seedDperm)
+		fmt.Printf("[GA][gen=%d] attempt=%d accept=%d dropRepair=%d dropInvalid=%d uniq=%d best=%+v diffW=%d diffD=%d\n",
+			gen, attempt, accept, dropRepair, dropInvalid, uniq, best.fitness, diffW, diffD)
+
 		if betterFitness(newBest.fitness, best.fitness) {
 			best = newBest
 			stall = 0
@@ -436,6 +457,39 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 	}
 
 	return buildDroneToTask(seed.taskOrder, best.Dperm), buildTaskToWorker(seed.taskOrder, best.Wperm)
+}
+func diffCount(a, b []int) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	c := 0
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			c++
+		}
+	}
+	return c
+}
+
+func countUnique(pop []gaIndividual) int {
+	seen := map[string]struct{}{}
+	for _, ind := range pop {
+		seen[indKey(ind)] = struct{}{}
+	}
+	return len(seen)
+}
+func indKey(ind gaIndividual) string {
+	// 只要能区分即可，别太慢
+	s := ""
+	for _, v := range ind.Wperm {
+		s += fmt.Sprintf("w%d,", v)
+	}
+	s += "|"
+	for _, v := range ind.Dperm {
+		s += fmt.Sprintf("d%d,", v)
+	}
+	return s
 }
 
 func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, horizon int) gaPrecompute {
@@ -589,12 +643,12 @@ func betterFitness(a, b gaFitness) bool {
 	if a.DoneH != b.DoneH {
 		return a.DoneH > b.DoneH
 	}
-	if a.Nmax != b.Nmax {
-		return a.Nmax < b.Nmax
-	}
 	if a.Navg != b.Navg {
 		return a.Navg < b.Navg
-	}
+	} // 先平均
+	if a.Nmax != b.Nmax {
+		return a.Nmax < b.Nmax
+	} // 再最慢
 	return a.Esum < b.Esum
 }
 
