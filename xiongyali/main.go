@@ -33,7 +33,7 @@ var uuidAgent map[string]core.Agent
 //  - call runPlanA() from your existing main.
 
 func main() {
-	name := "result/4.11result/testData.csv"
+	name := "result/4.11result/testChargeChangeTask.csv"
 	folders := core.DataProcess(name)
 	f, err := os.Open(name)
 	if err != nil {
@@ -87,7 +87,7 @@ func main() {
 			completeTaskCount := 0
 
 			engine := core.NewPlanAEngine(core.PlanAConfig{
-				TopLTasksPerWorker:    50,
+				TopLTasksPerWorker:    50, //50
 				ChargeMeetWindowSteps: 2,
 				BigM:                  1e9,
 			})
@@ -113,7 +113,6 @@ func main() {
 							println(ac.Drone.Id, "无人机与", ac.Worker.Id, "工作人员结成了联盟，完成任务", ac.TaskID, "消耗时间为", ac.Time, "剩余电量", ac.Drone.RemainingPower)
 						} else if ac.ActionType == core.DroneCarToChargePoint {
 							println(ac.Drone.Id, "无人机与", ac.Car.Id, "汽车结成了联盟，去充电点", ac.ChargePointId, "消耗时间为", ac.Time, "剩余电量", ac.Drone.RemainingPower)
-
 						}
 					}
 					actions = append(actions, res.Actions...)
@@ -250,6 +249,7 @@ func uavPowerRelease(drone *core.Drone, pow float64) {
 	drone.RemainingPower = drone.RemainingPower - pow
 	if drone.RemainingPower < 0 {
 		println("电量异常-----------------------------------------------------------------------------")
+		panic("电量异常")
 	}
 }
 

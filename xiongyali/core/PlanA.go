@@ -657,6 +657,8 @@ func pmx(parentA []int, parentB []int, rng *rand.Rand) []int {
 			}
 		}
 	}
+	return droneToTaskIdx
+}
 
 	for i := 0; i < n; i++ {
 		if child[i] == -1 {
