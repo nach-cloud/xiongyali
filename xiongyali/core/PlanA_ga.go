@@ -62,15 +62,18 @@ func buildSeedTriples(assignedTasks []int, taskToWorker map[int]int, costUT [][]
 }
 
 type gaFitness struct {
-	DoneH int
-	Nmax  int
-	Navg  float64
-	Esum  float64
+	Exec     int
+	DoneH    int
+	SlackMin float64
+	Nmax     int
+	Navg     float64
+	Esum     float64
 }
 
 type gaIndividual struct {
 	Wperm   []int
 	Dperm   []int
+	Mask    []bool
 	fitness gaFitness
 	valid   bool
 }
@@ -86,6 +89,7 @@ type gaPrecompute struct {
 	td          [][]int
 	tw          [][]int
 	horizon     int
+	dpow        []float64
 }
 
 func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, horizon int, rng *rand.Rand) (map[int]int, map[int]int) {
@@ -112,18 +116,21 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 		dupReject := 0
 		seen := map[string]struct{}{}
 
-		for len(next) < popSize {
+		maxAttempts := popSize * 20
+		for len(next) < popSize && attempt < maxAttempts {
 			attempt++
 			parentA := tournamentSelect(pop, rng, 3)
 			parentB := tournamentSelect(pop, rng, 3)
 			childW := pmx(parentA.Wperm, parentB.Wperm, rng)
 			childD := pmx(parentA.Dperm, parentB.Dperm, rng)
-			child := gaIndividual{Wperm: childW, Dperm: childD}
-			if !repairDronePerm(child.Dperm, seed.seedDperm, precompute) {
+			childM := maskCrossover(parentA.Mask, parentB.Mask, rng)
+			ensureAtLeastOneTrue(childM, rng)
+			child := gaIndividual{Wperm: childW, Dperm: childD, Mask: childM}
+			if !repairDronePermMasked(child.Dperm, child.Mask, seed.seedDperm, precompute) {
 				dropRepair++
 				continue
 			}
-			mutateIndividual(&child, precompute, rng, 0.2, 0.2)
+			mutateIndividual(&child, precompute, rng, 0.2, 0.2, 0.2)
 			child = evaluateIndividual(child, precompute)
 			if !child.valid {
 				dropInvalid++
@@ -151,23 +158,26 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 		distinctDoneH := map[int]int{}
 		distinctNmax := map[int]int{}
 		distinctNavg := map[float64]int{}
+		distinctExec := map[int]int{}
 		for _, ind := range pop {
 			distinctDoneH[ind.fitness.DoneH]++
 			distinctNmax[ind.fitness.Nmax]++
 			distinctNavg[ind.fitness.Navg]++
+			distinctExec[ind.fitness.Exec]++
 		}
 
 		fmt.Printf("[GA][gen=%d] attempt=%d accept=%d dropRepair=%d dropInvalid=%d dup=%d\n",
 			gen, attempt, accept, dropRepair, dropInvalid, dupReject)
 		fmt.Printf("[GA][gen=%d] distinct DoneH=%d Nmax=%d Navg=%d\n",
 			gen, len(distinctDoneH), len(distinctNmax), len(distinctNavg))
+		fmt.Printf("[GA][gen=%d] distinct Exec=%d\n", gen, len(distinctExec))
 
 		if stall >= stallLimit {
 			break
 		}
 	}
 
-	return buildDroneToTask(seed.taskOrder, best.Dperm), buildTaskToWorker(seed.taskOrder, best.Wperm)
+	return buildDroneToTaskMasked(seed.taskOrder, best.Dperm, best.Mask), buildTaskToWorkerMasked(seed.taskOrder, best.Wperm, best.Mask)
 }
 
 func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, horizon int) gaPrecompute {
@@ -187,11 +197,15 @@ func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Work
 	eneed := make([][]float64, len(droneList))
 	feasible := make([][]bool, len(droneList))
 	td := make([][]int, len(droneList))
+	dpow := make([]float64, len(droneList))
 	for dIdx, droneID := range droneList {
 		d := drones[droneID]
 		eneed[dIdx] = make([]float64, len(taskOrder))
 		feasible[dIdx] = make([]bool, len(taskOrder))
 		td[dIdx] = make([]int, len(taskOrder))
+		if d != nil {
+			dpow[dIdx] = d.RemainingPower
+		}
 		for r, tIdx := range taskOrder {
 			t := tasksList[tIdx]
 			if d == nil || t == nil {
@@ -233,14 +247,20 @@ func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Work
 		td:          td,
 		tw:          tw,
 		horizon:     horizon,
+		dpow:        dpow,
 	}
 }
 
 func initPopulation(seed seedTriples, precompute gaPrecompute, rng *rand.Rand, popSize int) []gaIndividual {
 	pop := make([]gaIndividual, 0, popSize)
+	mask := make([]bool, len(seed.seedWperm))
+	for i := range mask {
+		mask[i] = true
+	}
 	seedInd := gaIndividual{
 		Wperm: append([]int(nil), seed.seedWperm...),
 		Dperm: append([]int(nil), seed.seedDperm...),
+		Mask:  mask,
 	}
 	seedInd = evaluateIndividual(seedInd, precompute)
 	if seedInd.valid {
@@ -254,6 +274,11 @@ func initPopulation(seed seedTriples, precompute gaPrecompute, rng *rand.Rand, p
 			Wperm: append([]int(nil), seed.seedWperm...),
 			Dperm: append([]int(nil), seed.seedDperm...),
 		}
+		ind.Mask = make([]bool, len(ind.Wperm))
+		for i := range ind.Mask {
+			ind.Mask[i] = rng.Float64() < 0.75
+		}
+		ensureAtLeastOneTrue(ind.Mask, rng)
 		perturbIndividual(&ind, precompute, rng, 3)
 		ind = evaluateIndividual(ind, precompute)
 		if ind.valid {
@@ -272,20 +297,26 @@ func perturbIndividual(ind *gaIndividual, precompute gaPrecompute, rng *rand.Ran
 			swapPositions(ind.Wperm, rng)
 			continue
 		}
-		swapFeasibleDronePositions(ind.Dperm, precompute, rng, 5)
+		swapFeasibleDronePositionsMasked(ind.Dperm, ind.Mask, precompute, rng, 5)
 	}
 }
 
 func evaluateIndividual(ind gaIndividual, precompute gaPrecompute) gaIndividual {
-	if len(ind.Dperm) != len(precompute.tasks) || len(ind.Wperm) != len(precompute.tasks) {
+	if len(ind.Dperm) != len(precompute.tasks) || len(ind.Wperm) != len(precompute.tasks) || len(ind.Mask) != len(precompute.tasks) {
 		ind.valid = false
 		return ind
 	}
+	exec := 0
 	doneH := 0
 	nmax := 0
 	nsum := 0
 	esum := 0.0
+	slackMin := math.Inf(1)
 	for r := range precompute.tasks {
+		if !ind.Mask[r] {
+			continue
+		}
+		exec++
 		dIdx := ind.Dperm[r]
 		wIdx := ind.Wperm[r]
 		dRow, okD := precompute.droneIndex[dIdx]
@@ -306,12 +337,22 @@ func evaluateIndividual(ind gaIndividual, precompute gaPrecompute) gaIndividual 
 		}
 		nsum += nr
 		esum += precompute.eneed[dRow][r]
+		slack := precompute.dpow[dRow] - precompute.eneed[dRow][r]
+		if slack < slackMin {
+			slackMin = slack
+		}
+	}
+	if exec == 0 {
+		ind.valid = false
+		return ind
 	}
 	ind.fitness = gaFitness{
-		DoneH: doneH,
-		Nmax:  nmax,
-		Navg:  float64(nsum) / float64(len(precompute.tasks)),
-		Esum:  esum,
+		Exec:     exec,
+		DoneH:    doneH,
+		SlackMin: slackMin,
+		Nmax:     nmax,
+		Navg:     float64(nsum) / float64(exec),
+		Esum:     esum,
 	}
 	ind.valid = true
 	return ind
@@ -321,11 +362,17 @@ func betterFitness(a, b gaFitness) bool {
 	if a.DoneH != b.DoneH {
 		return a.DoneH > b.DoneH
 	}
-	if a.Nmax != b.Nmax {
-		return a.Nmax < b.Nmax
+	if a.Exec != b.Exec {
+		return a.Exec > b.Exec
+	}
+	if a.SlackMin != b.SlackMin {
+		return a.SlackMin > b.SlackMin
 	}
 	if a.Navg != b.Navg {
 		return a.Navg < b.Navg
+	}
+	if a.Nmax != b.Nmax {
+		return a.Nmax < b.Nmax
 	}
 	return a.Esum < b.Esum
 }
@@ -391,19 +438,39 @@ func pmx(parentA []int, parentB []int, rng *rand.Rand) []int {
 	return child
 }
 
-func repairDronePerm(dperm []int, seed []int, precompute gaPrecompute) bool {
+func maskCrossover(a []bool, b []bool, rng *rand.Rand) []bool {
+	n := len(a)
+	if n == 0 {
+		return nil
+	}
+	child := make([]bool, n)
+	cut := rng.Intn(n)
+	for i := 0; i < n; i++ {
+		if i < cut {
+			child[i] = a[i]
+		} else {
+			child[i] = b[i]
+		}
+	}
+	return child
+}
+
+func repairDronePermMasked(dperm []int, mask []bool, seed []int, precompute gaPrecompute) bool {
 	posByDrone := make(map[int]int)
 	for i, d := range dperm {
 		posByDrone[d] = i
 	}
 
 	for r := range precompute.tasks {
+		if r >= len(mask) || !mask[r] {
+			continue
+		}
 		if feasibleDroneAt(dperm[r], r, precompute) {
 			continue
 		}
 		swapped := false
 		for s := 0; s < len(dperm); s++ {
-			if s == r {
+			if s == r || (s < len(mask) && !mask[s]) {
 				continue
 			}
 			if feasibleDroneAt(dperm[s], r, precompute) && feasibleDroneAt(dperm[r], s, precompute) {
@@ -443,12 +510,24 @@ func feasibleDroneAt(droneID int, taskPos int, precompute gaPrecompute) bool {
 	return precompute.feasible[dRow][taskPos]
 }
 
-func mutateIndividual(ind *gaIndividual, precompute gaPrecompute, rng *rand.Rand, pmW float64, pmD float64) {
+func mutateIndividual(ind *gaIndividual, precompute gaPrecompute, rng *rand.Rand, pmW float64, pmD float64, pmM float64) {
 	if rng.Float64() < pmW {
 		swapPositions(ind.Wperm, rng)
 	}
 	if rng.Float64() < pmD {
-		swapFeasibleDronePositions(ind.Dperm, precompute, rng, 5)
+		swapFeasibleDronePositionsMasked(ind.Dperm, ind.Mask, precompute, rng, 5)
+	}
+	if rng.Float64() < pmM {
+		mutateMask(ind.Mask, rng, 0.2)
+	}
+	ensureAtLeastOneTrue(ind.Mask, rng)
+}
+
+func mutateMask(mask []bool, rng *rand.Rand, flipRate float64) {
+	for i := range mask {
+		if rng.Float64() < flipRate {
+			mask[i] = !mask[i]
+		}
 	}
 }
 
@@ -461,7 +540,19 @@ func swapPositions(perm []int, rng *rand.Rand) {
 	perm[i], perm[j] = perm[j], perm[i]
 }
 
-func swapFeasibleDronePositions(perm []int, precompute gaPrecompute, rng *rand.Rand, tries int) {
+func ensureAtLeastOneTrue(mask []bool, rng *rand.Rand) {
+	for _, v := range mask {
+		if v {
+			return
+		}
+	}
+	if len(mask) == 0 {
+		return
+	}
+	mask[rng.Intn(len(mask))] = true
+}
+
+func swapFeasibleDronePositionsMasked(perm []int, mask []bool, precompute gaPrecompute, rng *rand.Rand, tries int) {
 	if len(perm) < 2 {
 		return
 	}
@@ -471,6 +562,12 @@ func swapFeasibleDronePositions(perm []int, precompute gaPrecompute, rng *rand.R
 		if i == j {
 			continue
 		}
+		if i < len(mask) && !mask[i] {
+			continue
+		}
+		if j < len(mask) && !mask[j] {
+			continue
+		}
 		if feasibleDroneAt(perm[i], j, precompute) && feasibleDroneAt(perm[j], i, precompute) {
 			perm[i], perm[j] = perm[j], perm[i]
 			return
@@ -478,22 +575,28 @@ func swapFeasibleDronePositions(perm []int, precompute gaPrecompute, rng *rand.R
 	}
 }
 
-func buildDroneToTask(taskOrder []int, dperm []int) map[int]int {
+func buildDroneToTaskMasked(taskOrder []int, dperm []int, mask []bool) map[int]int {
 	droneToTask := make(map[int]int)
 	for r, taskIdx := range taskOrder {
-		if r >= len(dperm) {
+		if r >= len(dperm) || r >= len(mask) {
 			break
+		}
+		if !mask[r] {
+			continue
 		}
 		droneToTask[dperm[r]] = taskIdx
 	}
 	return droneToTask
 }
 
-func buildTaskToWorker(taskOrder []int, wperm []int) map[int]int {
+func buildTaskToWorkerMasked(taskOrder []int, wperm []int, mask []bool) map[int]int {
 	taskToWorker := make(map[int]int)
 	for r, taskIdx := range taskOrder {
-		if r >= len(wperm) {
+		if r >= len(wperm) || r >= len(mask) {
 			break
+		}
+		if !mask[r] {
+			continue
 		}
 		taskToWorker[taskIdx] = wperm[r]
 	}
@@ -520,6 +623,14 @@ func indexOf(list []int, value int) int {
 
 func indKey(ind gaIndividual) string {
 	var b strings.Builder
+	for _, v := range ind.Mask {
+		if v {
+			b.WriteString("1")
+		} else {
+			b.WriteString("0")
+		}
+	}
+	b.WriteString("|")
 	for _, v := range ind.Wperm {
 		b.WriteString(fmt.Sprintf("w%d,", v))
 	}
