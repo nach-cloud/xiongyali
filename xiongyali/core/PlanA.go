@@ -122,7 +122,7 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	droneToTaskIdx := seed.droneToTask
 	if seed.len() > 0 {
 		rng := rand.New(rand.NewSource(int64(step*1000 + date)))
-		horizon := DecideCount - step
+		horizon := 2
 		if horizon < 0 {
 			horizon = 0
 		}
