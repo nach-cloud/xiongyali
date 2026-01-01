@@ -121,7 +121,11 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	droneToTaskIdx := seed.droneToTask
 	if seed.len() > 0 {
 		rng := rand.New(rand.NewSource(int64(step*1000 + date)))
-		droneToTaskIdx, gaTaskToWorker = e.runTripleGA(seed, tasksList, workers, drones, chargeList, rng)
+		horizon := DecideCount - step
+		if horizon < 0 {
+			horizon = 0
+		}
+		droneToTaskIdx, gaTaskToWorker = e.runTripleGA(seed, tasksList, workers, drones, chargeList, horizon, rng)
 	}
 	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
 	carToChargeID, droneToCar := e.assignCarsToCharges(droneCharge, droneWeights, drones, cars, chargeList, carTarget)
@@ -359,9 +363,10 @@ func buildSeedTriples(assignedTasks []int, taskToWorker map[int]int, costUT [][]
 }
 
 type gaFitness struct {
-	Nmax int
-	Navg float64
-	Esum float64
+	DoneH int
+	Nmax  int
+	Navg  float64
+	Esum  float64
 }
 
 type gaIndividual struct {
@@ -372,20 +377,20 @@ type gaIndividual struct {
 }
 
 type gaPrecompute struct {
-	tasks        []int
-	drones       []int
-	workers      []int
-	droneIndex   map[int]int
-	workerIndex  map[int]int
-	distToCharge []float64
-	eneed        [][]float64
-	feasible     [][]bool
-	td           [][]int
-	tw           [][]int
+	tasks       []int
+	drones      []int
+	workers     []int
+	droneIndex  map[int]int
+	workerIndex map[int]int
+	eneed       [][]float64
+	feasible    [][]bool
+	td          [][]int
+	tw          [][]int
+	horizon     int
 }
 
-func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, rng *rand.Rand) (map[int]int, map[int]int) {
-	precompute := buildGAPrecompute(seed, tasksList, workers, drones, chargeList)
+func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, horizon int, rng *rand.Rand) (map[int]int, map[int]int) {
+	precompute := buildGAPrecompute(seed, tasksList, workers, drones, chargeList, horizon)
 	if len(precompute.tasks) == 0 {
 		return seed.droneToTask, buildTaskToWorker(seed.taskOrder, seed.seedWperm)
 	}
@@ -433,7 +438,7 @@ func (e *PlanAEngine) runTripleGA(seed seedTriples, tasksList []*TaskPoint, work
 	return buildDroneToTask(seed.taskOrder, best.Dperm), buildTaskToWorker(seed.taskOrder, best.Wperm)
 }
 
-func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint) gaPrecompute {
+func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, chargeList []*ChargePoint, horizon int) gaPrecompute {
 	taskOrder := append([]int(nil), seed.taskOrder...)
 	droneList := append([]int(nil), seed.seedDperm...)
 	workerList := append([]int(nil), seed.seedWperm...)
@@ -445,26 +450,6 @@ func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Work
 	workerIndex := make(map[int]int)
 	for i, wi := range workerList {
 		workerIndex[wi] = i
-	}
-
-	distToCharge := make([]float64, len(taskOrder))
-	for r, tIdx := range taskOrder {
-		t := tasksList[tIdx]
-		if t == nil || len(chargeList) == 0 {
-			distToCharge[r] = 0
-			continue
-		}
-		best := math.MaxFloat64
-		for _, ch := range chargeList {
-			if ch == nil {
-				continue
-			}
-			dist := Distance(t.X, t.Y, ch.X, ch.Y)
-			if dist < best {
-				best = dist
-			}
-		}
-		distToCharge[r] = best
 	}
 
 	eneed := make([][]float64, len(droneList))
@@ -484,7 +469,7 @@ func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Work
 				continue
 			}
 			dist := Distance(d.X, d.Y, t.X, t.Y)
-			need := dist + t.CostPow + distToCharge[r]
+			need := dist + t.CostPow + t.ChargeDist
 			eneed[dIdx][r] = need
 			feasible[dIdx][r] = d.RemainingPower >= need
 			td[dIdx][r] = stepsTo(d.Position, t.Position, d.URget)
@@ -506,16 +491,16 @@ func buildGAPrecompute(seed seedTriples, tasksList []*TaskPoint, workers []*Work
 	}
 
 	return gaPrecompute{
-		tasks:        taskOrder,
-		drones:       droneList,
-		workers:      workerList,
-		droneIndex:   droneIndex,
-		workerIndex:  workerIndex,
-		distToCharge: distToCharge,
-		eneed:        eneed,
-		feasible:     feasible,
-		td:           td,
-		tw:           tw,
+		tasks:       taskOrder,
+		drones:      droneList,
+		workers:     workerList,
+		droneIndex:  droneIndex,
+		workerIndex: workerIndex,
+		eneed:       eneed,
+		feasible:    feasible,
+		td:          td,
+		tw:          tw,
+		horizon:     horizon,
 	}
 }
 
@@ -564,6 +549,7 @@ func evaluateIndividual(ind gaIndividual, precompute gaPrecompute) gaIndividual 
 		ind.valid = false
 		return ind
 	}
+	doneH := 0
 	nmax := 0
 	nsum := 0
 	esum := 0.0
@@ -583,19 +569,26 @@ func evaluateIndividual(ind gaIndividual, precompute gaPrecompute) gaIndividual 
 		if nr > nmax {
 			nmax = nr
 		}
+		if nr <= precompute.horizon {
+			doneH++
+		}
 		nsum += nr
 		esum += precompute.eneed[dRow][r]
 	}
 	ind.fitness = gaFitness{
-		Nmax: nmax,
-		Navg: float64(nsum) / float64(len(precompute.tasks)),
-		Esum: esum,
+		DoneH: doneH,
+		Nmax:  nmax,
+		Navg:  float64(nsum) / float64(len(precompute.tasks)),
+		Esum:  esum,
 	}
 	ind.valid = true
 	return ind
 }
 
 func betterFitness(a, b gaFitness) bool {
+	if a.DoneH != b.DoneH {
+		return a.DoneH > b.DoneH
+	}
 	if a.Nmax != b.Nmax {
 		return a.Nmax < b.Nmax
 	}
@@ -657,8 +650,6 @@ func pmx(parentA []int, parentB []int, rng *rand.Rand) []int {
 			}
 		}
 	}
-	return droneToTaskIdx
-}
 
 	for i := 0; i < n; i++ {
 		if child[i] == -1 {
@@ -910,8 +901,10 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 			continue
 		}
 		t := tasksList[tIdx]
-		finalDroneTask[di] = tIdx
-		e.droneCommitTask[d.UUID] = t.Id
+		if feasibleDroneTask(d, t) {
+			finalDroneTask[di] = tIdx
+			e.droneCommitTask[d.UUID] = t.Id
+		}
 	}
 
 	for di, d := range drones {
