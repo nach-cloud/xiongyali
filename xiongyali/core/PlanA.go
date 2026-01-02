@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"math"
+	"math/rand"
 	"sort"
 )
 
@@ -485,6 +486,8 @@ func (e *PlanAEngine) assignCarsToCharges(droneCharge map[int]struct{}, droneWei
 			break
 		}
 	}
+	return carToChargeID, droneToCar
+}
 
 	for ci, chID := range carTarget {
 		carToChargeID[ci] = chID
