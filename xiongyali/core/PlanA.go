@@ -113,24 +113,13 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	}
 
 	tasksList := buildTasksList(taskPoints)
-	tasksList = e.selectTaskSubsetALNS(tasksList, workers, drones, horizon)
-	if len(tasksList) == 0 {
+	plan := e.optimizePlanALNS(tasksList, workers, drones, cars, chargePoints, carTarget, chargeList, taskPoints, horizon)
+	if plan == nil || len(plan.tasks) == 0 {
 		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
 	}
-	omegaU := buildOmegaU(tasksList, drones)
-	omegaW := e.buildOmegaW(tasksList, workers)
-	costWT := e.buildCostWT(tasksList, workers, drones, omegaW, omegaU)
-	assignedTasks, taskToWorker := buildTaskAssignment(costWT, e.cfg.BigM)
-	if len(assignedTasks) == 0 {
-		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
-	}
-
-	costUT := e.buildCostUT(tasksList, workers, drones, assignedTasks, taskToWorker)
-	droneToTaskIdx := buildDroneToTaskIdxFromCost(assignedTasks, costUT, e.cfg.BigM)
-	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
-	fmt.Printf("[EXEC] taskCand=%d taskMap=%d finalTask=%d charge=%d\n", len(tasksList), len(droneToTaskIdx), len(finalDroneTask), len(droneCharge))
-	carToChargeID, droneToCar := e.assignCarsToCharges(droneCharge, droneWeights, drones, cars, chargeList, carTarget)
-	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, taskToWorker, carToChargeID, droneToCar)
+	fmt.Printf("[EXEC] taskCand=%d taskMap=%d finalTask=%d charge=%d\n", len(plan.tasks), len(plan.droneToTaskIdx), len(plan.finalDroneTask), len(plan.droneCharge))
+	carToChargeID, droneToCar := e.assignCarsToCharges(plan.droneCharge, plan.droneWeights, drones, cars, chargeList, plan.carTarget)
+	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, plan.tasks, taskPoints, chargePoints, plan.finalDroneTask, plan.droneCharge, plan.taskToWorker, carToChargeID, droneToCar)
 
 	return PlanAResult{Actions: actions, CompletedTaskIDs: completedIDs}
 }
