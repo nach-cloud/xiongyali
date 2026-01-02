@@ -38,6 +38,9 @@ type PlanAConfig struct {
 
 	// BigM is the “infinite” cost used in assignment matrices.
 	BigM float64
+
+	// TaskSubsetMax limits GA-selected tasks per step.
+	TaskSubsetMax int
 }
 
 // PlanAEngine keeps light state across decision steps.
@@ -66,6 +69,9 @@ func NewPlanAEngine(cfg PlanAConfig) *PlanAEngine {
 	}
 	if cfg.BigM <= 0 {
 		cfg.BigM = 1e9
+	}
+	if cfg.TaskSubsetMax <= 0 {
+		cfg.TaskSubsetMax = 20
 	}
 	return &PlanAEngine{
 		cfg:              cfg,
@@ -108,6 +114,10 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	}
 
 	tasksList := buildTasksList(taskPoints)
+	tasksList = e.selectTaskSubset(tasksList, workers, drones, horizon)
+	if len(tasksList) == 0 {
+		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
+	}
 	omegaU := buildOmegaU(tasksList, drones)
 	omegaW := e.buildOmegaW(tasksList, workers)
 	costWT := e.buildCostWT(tasksList, workers, drones, omegaW, omegaU)
@@ -117,21 +127,11 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	}
 
 	costUT := e.buildCostUT(tasksList, workers, drones, assignedTasks, taskToWorker)
-	seed := buildSeedTriples(assignedTasks, taskToWorker, costUT, e.cfg.BigM)
-	gaTaskToWorker := taskToWorker
-	droneToTaskIdx := seed.droneToTask
-	if seed.len() > 0 {
-		rng := rand.New(rand.NewSource(int64(step*1000 + date)))
-		horizon := 2
-		if horizon < 0 {
-			horizon = 0
-		}
-		droneToTaskIdx, gaTaskToWorker = e.runTripleGA(seed, tasksList, workers, drones, chargeList, horizon, rng)
-	}
+	droneToTaskIdx := buildDroneToTaskIdxFromCost(assignedTasks, costUT, e.cfg.BigM)
 	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints)
-	fmt.Printf("[EXEC] seedL=%d taskMap=%d finalTask=%d charge=%d\n", seed.len(), len(droneToTaskIdx), len(finalDroneTask), len(droneCharge))
+	fmt.Printf("[EXEC] taskCand=%d taskMap=%d finalTask=%d charge=%d\n", len(tasksList), len(droneToTaskIdx), len(finalDroneTask), len(droneCharge))
 	carToChargeID, droneToCar := e.assignCarsToCharges(droneCharge, droneWeights, drones, cars, chargeList, carTarget)
-	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, gaTaskToWorker, carToChargeID, droneToCar)
+	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, tasksList, taskPoints, chargePoints, finalDroneTask, droneCharge, taskToWorker, carToChargeID, droneToCar)
 
 	return PlanAResult{Actions: actions, CompletedTaskIDs: completedIDs}
 }
@@ -283,6 +283,22 @@ func buildTaskAssignment(costWT [][]float64, bigM float64) ([]int, map[int]int) 
 		taskToWorker[tIdx] = j
 	}
 	return assignedTasks, taskToWorker
+}
+
+func buildDroneToTaskIdxFromCost(assignedTasks []int, costUT [][]float64, bigM float64) map[int]int {
+	tN := len(assignedTasks)
+	utAssign := hungarianMin(costUT, bigM)
+	droneToTaskIdx := make(map[int]int)
+	for i, k := range utAssign {
+		if k < 0 || k >= tN {
+			continue
+		}
+		if costUT[i][k] >= bigM/2 {
+			continue
+		}
+		droneToTaskIdx[i] = assignedTasks[k]
+	}
+	return droneToTaskIdx
 }
 
 func (e *PlanAEngine) buildCostUT(tasksList []*TaskPoint, workers []*Worker, drones []*Drone, assignedTasks []int, taskToWorker map[int]int) [][]float64 {
