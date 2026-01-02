@@ -47,7 +47,7 @@ func (e *PlanAEngine) optimizePlanALNS(tasksList []*TaskPoint, workers []*Worker
 	temperature := 1.0
 	for iter := 0; iter < iterations; iter++ {
 		cand := destroyPlanState(current, cars, chargeList, rng)
-		cand = repairPlanState(e, cand, candidates, k, workers, drones, cars, taskPoints, carTarget, chargePoints, rng)
+		cand = repairPlanState(e, cand, candidates, k, workers, drones, cars, taskPoints, chargePoints, rng)
 		if cand == nil {
 			continue
 		}
@@ -157,12 +157,12 @@ func destroyCarTargets(carTarget map[int]int, cars []*Car, chargeList []*ChargeP
 	return newTarget
 }
 
-func repairPlanState(e *PlanAEngine, cand *planState, candidates []*TaskPoint, k int, workers []*Worker, drones []*Drone, cars []*Car, taskPoints map[int]*TaskPoint, carTarget map[int]int, chargePoints map[int]*ChargePoint, rng *rand.Rand) *planState {
+func repairPlanState(e *PlanAEngine, cand *planState, candidates []*TaskPoint, k int, workers []*Worker, drones []*Drone, cars []*Car, taskPoints map[int]*TaskPoint, chargePoints map[int]*ChargePoint, rng *rand.Rand) *planState {
 	if cand == nil {
 		return nil
 	}
 	taskSet := repairTasks(cand.tasks, candidates, k, rng)
-	return e.buildPlanFromTasks(taskSet, workers, drones, cars, taskPoints, carTarget, chargePoints, cand.forcedCharge)
+	return e.buildPlanFromTasks(taskSet, workers, drones, cars, taskPoints, cand.carTarget, chargePoints, cand.forcedCharge)
 }
 
 func repairTasks(tasks []*TaskPoint, candidates []*TaskPoint, k int, rng *rand.Rand) []*TaskPoint {
@@ -202,7 +202,7 @@ func (e *PlanAEngine) buildPlanFromTasks(tasks []*TaskPoint, workers []*Worker, 
 	}
 	costUT := buildCostUTWithChargeMask(e, tasks, workers, drones, assignedTasks, taskToWorker, forcedCharge)
 	droneToTaskIdx := buildDroneToTaskIdxFromCost(assignedTasks, costUT, e.cfg.BigM)
-	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisions(drones, cars, tasks, taskPoints, droneToTaskIdx, carTarget, chargePoints)
+	finalDroneTask, droneCharge, droneWeights := e.buildDroneDecisionsPreview(drones, cars, tasks, taskPoints, droneToTaskIdx, carTarget, chargePoints)
 	if forcedCharge != nil {
 		for di := range forcedCharge {
 			delete(finalDroneTask, di)
@@ -253,7 +253,7 @@ func evaluatePlanScore(plan *planState, workers []*Worker, drones []*Drone, hori
 	if plan == nil {
 		return planScore{}
 	}
-	return evaluateAssignmentsScore(plan.tasks, workers, drones, plan.taskToWorker, plan.droneToTaskIdx, horizon)
+	return evaluateAssignmentsScore(plan.tasks, workers, drones, plan.taskToWorker, plan.finalDroneTask, horizon)
 }
 
 func evaluateAssignmentsScore(tasks []*TaskPoint, workers []*Worker, drones []*Drone, taskToWorker map[int]int, droneToTask map[int]int, horizon int) planScore {

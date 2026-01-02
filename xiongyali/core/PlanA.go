@@ -118,6 +118,7 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	if plan == nil || len(plan.tasks) == 0 {
 		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
 	}
+	e.updateDroneCommitments(plan, drones)
 	fmt.Printf("[EXEC] taskCand=%d taskMap=%d finalTask=%d charge=%d\n", len(plan.tasks), len(plan.droneToTaskIdx), len(plan.finalDroneTask), len(plan.droneCharge))
 	carToChargeID, droneToCar := e.assignCarsToCharges(plan.droneCharge, plan.droneWeights, drones, cars, chargeList, plan.carTarget)
 	actions, completedIDs := e.buildActions(step, date, drones, workers, cars, plan.tasks, taskPoints, chargePoints, plan.finalDroneTask, plan.droneCharge, plan.taskToWorker, carToChargeID, droneToCar)
@@ -365,6 +366,14 @@ func nearestChargeID(car *Car, chargeList []*ChargePoint) int {
 }
 
 func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, droneToTaskIdx map[int]int, carTarget map[int]int, chargePoints map[int]*ChargePoint) (map[int]int, map[int]struct{}, map[int]float64) {
+	return e.buildDroneDecisionsWithCommit(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints, true)
+}
+
+func (e *PlanAEngine) buildDroneDecisionsPreview(drones []*Drone, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, droneToTaskIdx map[int]int, carTarget map[int]int, chargePoints map[int]*ChargePoint) (map[int]int, map[int]struct{}, map[int]float64) {
+	return e.buildDroneDecisionsWithCommit(drones, cars, tasksList, taskPoints, droneToTaskIdx, carTarget, chargePoints, false)
+}
+
+func (e *PlanAEngine) buildDroneDecisionsWithCommit(drones []*Drone, cars []*Car, tasksList []*TaskPoint, taskPoints map[int]*TaskPoint, droneToTaskIdx map[int]int, carTarget map[int]int, chargePoints map[int]*ChargePoint, commit bool) (map[int]int, map[int]struct{}, map[int]float64) {
 	finalDroneTask := make(map[int]int)
 	droneCharge := make(map[int]struct{})
 	droneWeights := make(map[int]float64)
@@ -438,7 +447,9 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		t := tasksList[tIdx]
 		if feasibleDroneTask(d, t) {
 			finalDroneTask[di] = tIdx
-			e.droneCommitTask[d.UUID] = t.Id
+			if commit {
+				e.droneCommitTask[d.UUID] = t.Id
+			}
 		}
 	}
 
@@ -679,6 +690,26 @@ func (e *PlanAEngine) buildActions(step int, date int, drones []*Drone, workers 
 	}
 
 	return actions, completedIDs
+}
+
+func (e *PlanAEngine) updateDroneCommitments(plan *planState, drones []*Drone) {
+	if plan == nil || len(drones) == 0 {
+		return
+	}
+	for di, tIdx := range plan.finalDroneTask {
+		if di < 0 || di >= len(drones) || tIdx < 0 || tIdx >= len(plan.tasks) {
+			continue
+		}
+		t := plan.tasks[tIdx]
+		if t == nil {
+			continue
+		}
+		d := drones[di]
+		if d == nil {
+			continue
+		}
+		e.droneCommitTask[d.UUID] = t.Id
+	}
 }
 
 // decideOnlyCharging is a fallback when tasks cannot be completed this step.
