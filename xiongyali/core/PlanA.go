@@ -423,8 +423,10 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		}
 
 		if tid, ok := committedTaskForDrone(d); ok {
+			found := false
 			for tIdx, t := range tasksList {
 				if t != nil && t.Id == tid {
+					found = true
 					if feasibleDroneTask(d, t) {
 						finalDroneTask[di] = tIdx
 					} else {
@@ -433,7 +435,11 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 					break
 				}
 			}
-			continue
+			if !found {
+				delete(e.droneCommitTask, d.UUID)
+			} else {
+				continue
+			}
 		}
 
 		tIdx, hasTask := droneToTaskIdx[di]
@@ -480,6 +486,8 @@ func (e *PlanAEngine) assignCarsToCharges(droneCharge map[int]struct{}, droneWei
 			break
 		}
 	}
+	return carToChargeID, droneToCar
+}
 
 	for ci, chID := range carTarget {
 		carToChargeID[ci] = chID

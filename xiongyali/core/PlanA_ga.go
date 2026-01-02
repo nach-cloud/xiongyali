@@ -249,8 +249,8 @@ func evaluateAssignments(tasks []*TaskPoint, workers []*Worker, drones []*Drone,
 		}
 		nsum += nr
 		dist := Distance(d.X, d.Y, t.X, t.Y)
-		remain := d.RemainingPower - (dist + t.CostPow)
-		if remain < t.ChargeDist {
+		slack := d.RemainingPower - (dist + t.CostPow + t.ChargeDist)
+		if slack < 0 {
 			needCharge++
 		}
 	}
