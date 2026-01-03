@@ -63,10 +63,6 @@ type PlanAConfig struct {
 type PlanAEngine struct {
 	cfg PlanAConfig
 
-	// droneCommitTask maps drone UUID -> committed task id (if any).
-	// Commitment lasts until task disappears (completed) or becomes infeasible.
-	droneCommitTask map[string]int
-
 	// workerCommitTask maps worker UUID -> committed task id.
 	workerCommitTask map[string]int
 
@@ -105,7 +101,6 @@ func NewPlanAEngine(cfg PlanAConfig) *PlanAEngine {
 	}
 	return &PlanAEngine{
 		cfg:              cfg,
-		droneCommitTask:  make(map[string]int),
 		workerCommitTask: make(map[string]int),
 		carPlan:          make(map[string]*CarPlanEntry),
 	}
@@ -455,7 +450,7 @@ func (e *PlanAEngine) selectTaskAssignmentBeam(costWT [][]float64, tasksList []*
 		}
 	}
 
-	best = e.improveBySwap(best, ordered, costWT, tasksList, workers, drones, cache)
+	best = e.improveByNeighborhood(best, ordered, costWT, tasksList, workers, drones, cache)
 
 	if best.eval.assigned == nil {
 		return buildTaskAssignment(costWT, e.cfg.BigM)
@@ -490,36 +485,76 @@ func orderCandidateTasks(costWT [][]float64, tasksList []*TaskPoint, candidates 
 	return ordered
 }
 
-func (e *PlanAEngine) improveBySwap(state beamState, ordered []candidateEntry, costWT [][]float64, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, cache map[string]beamEval) beamState {
+func (e *PlanAEngine) improveByNeighborhood(state beamState, ordered []candidateEntry, costWT [][]float64, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, cache map[string]beamEval) beamState {
 	for round := 0; round < e.cfg.SwapMaxRounds; round++ {
-		swapCandidates := topRemainingIndices(ordered, state.mask, e.cfg.SwapExpand)
-		if len(swapCandidates) == 0 {
-			break
-		}
+		changed := false
 		selected := selectedIndices(state.mask)
-		bestEval := state.eval
-		bestMask := state.mask
-		improved := false
-		for _, x := range selected {
-			for _, y := range swapCandidates {
-				if x == y {
-					continue
-				}
+		if len(selected) > 0 {
+			bestEval := state.eval
+			bestMask := state.mask
+			for _, x := range selected {
 				newMask := copyMask(state.mask)
 				newMask[x] = false
+				eval := e.evalSubset(newMask, ordered, costWT, tasksList, workers, drones, cache)
+				if betterBeamEval(eval, bestEval) {
+					bestEval = eval
+					bestMask = newMask
+				}
+			}
+			if betterBeamEval(bestEval, state.eval) {
+				state = beamState{mask: bestMask, eval: bestEval}
+				changed = true
+			}
+		}
+
+		addCandidates := topRemainingIndices(ordered, state.mask, e.cfg.SwapExpand)
+		if len(addCandidates) > 0 {
+			bestEval := state.eval
+			bestMask := state.mask
+			for _, y := range addCandidates {
+				newMask := copyMask(state.mask)
 				newMask[y] = true
 				eval := e.evalSubset(newMask, ordered, costWT, tasksList, workers, drones, cache)
 				if betterBeamEval(eval, bestEval) {
 					bestEval = eval
 					bestMask = newMask
-					improved = true
 				}
 			}
+			if betterBeamEval(bestEval, state.eval) {
+				state = beamState{mask: bestMask, eval: bestEval}
+				changed = true
+			}
 		}
-		if !improved {
+
+		swapCandidates := topRemainingIndices(ordered, state.mask, e.cfg.SwapExpand)
+		if len(swapCandidates) > 0 {
+			selected = selectedIndices(state.mask)
+			bestEval := state.eval
+			bestMask := state.mask
+			for _, x := range selected {
+				for _, y := range swapCandidates {
+					if x == y {
+						continue
+					}
+					newMask := copyMask(state.mask)
+					newMask[x] = false
+					newMask[y] = true
+					eval := e.evalSubset(newMask, ordered, costWT, tasksList, workers, drones, cache)
+					if betterBeamEval(eval, bestEval) {
+						bestEval = eval
+						bestMask = newMask
+					}
+				}
+			}
+			if betterBeamEval(bestEval, state.eval) {
+				state = beamState{mask: bestMask, eval: bestEval}
+				changed = true
+			}
+		}
+
+		if !changed {
 			break
 		}
-		state = beamState{mask: bestMask, eval: bestEval}
 	}
 	return state
 }
@@ -754,37 +789,8 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		return 0, false
 	}
 
-	committedTaskForDrone := func(d *Drone) (int, bool) {
-		if d == nil {
-			return 0, false
-		}
-		tid, ok := e.droneCommitTask[d.UUID]
-		if !ok {
-			return 0, false
-		}
-		if _, exists := taskPoints[tid]; !exists {
-			delete(e.droneCommitTask, d.UUID)
-			return 0, false
-		}
-		return tid, true
-	}
-
 	for di, d := range drones {
 		if d == nil {
-			continue
-		}
-
-		if tid, ok := committedTaskForDrone(d); ok {
-			for tIdx, t := range tasksList {
-				if t != nil && t.Id == tid {
-					if feasibleDroneTask(d, t) {
-						finalDroneTask[di] = tIdx
-					} else {
-						delete(e.droneCommitTask, d.UUID)
-					}
-					break
-				}
-			}
 			continue
 		}
 
@@ -794,7 +800,6 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		}
 		t := tasksList[tIdx]
 		finalDroneTask[di] = tIdx
-		e.droneCommitTask[d.UUID] = t.Id
 	}
 
 	for di, d := range drones {
