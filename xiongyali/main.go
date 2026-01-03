@@ -90,6 +90,12 @@ func main() {
 				TopLTasksPerWorker:    50, //50
 				ChargeMeetWindowSteps: 2,
 				BigM:                  1e9,
+				UseGeneticDecoder:     true,
+				GeneticMaxTasks:       120,
+				GeneticPopulation:     30,
+				GeneticGenerations:    25,
+				GeneticElite:          4,
+				GeneticMutationRate:   0.08,
 			})
 
 			actions := make([]core.Action, 0)
