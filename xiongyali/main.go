@@ -90,6 +90,13 @@ func main() {
 				TopLTasksPerWorker:    50, //50
 				ChargeMeetWindowSteps: 2,
 				BigM:                  1e9,
+				UseBeamDecoder:        true,
+				BeamMaxTasks:          120,
+				BeamWidth:             5,
+				BeamExpand:            20,
+				BeamSlack:             5,
+				SwapExpand:            30,
+				SwapMaxRounds:         10,
 			})
 
 			actions := make([]core.Action, 0)
