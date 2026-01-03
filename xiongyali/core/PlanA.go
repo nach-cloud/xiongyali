@@ -2,6 +2,7 @@ package core
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 )
 
@@ -36,6 +37,20 @@ type PlanAConfig struct {
 
 	// BigM is the “infinite” cost used in assignment matrices.
 	BigM float64
+
+	// UseGeneticDecoder toggles the memetic (GA + Hungarian) decoder.
+	UseGeneticDecoder bool
+
+	// GeneticMaxTasks caps the candidate task count for GA decoding.
+	GeneticMaxTasks int
+	// GeneticPopulation is the population size used by GA decoding.
+	GeneticPopulation int
+	// GeneticGenerations is the number of GA iterations.
+	GeneticGenerations int
+	// GeneticElite keeps the top-N solutions each generation.
+	GeneticElite int
+	// GeneticMutationRate controls per-gene mutation probability.
+	GeneticMutationRate float64
 }
 
 // PlanAEngine keeps light state across decision steps.
@@ -64,6 +79,21 @@ func NewPlanAEngine(cfg PlanAConfig) *PlanAEngine {
 	}
 	if cfg.BigM <= 0 {
 		cfg.BigM = 1e9
+	}
+	if cfg.GeneticMaxTasks <= 0 {
+		cfg.GeneticMaxTasks = 120
+	}
+	if cfg.GeneticPopulation <= 0 {
+		cfg.GeneticPopulation = 30
+	}
+	if cfg.GeneticGenerations <= 0 {
+		cfg.GeneticGenerations = 25
+	}
+	if cfg.GeneticElite <= 0 {
+		cfg.GeneticElite = 4
+	}
+	if cfg.GeneticMutationRate <= 0 {
+		cfg.GeneticMutationRate = 0.08
 	}
 	return &PlanAEngine{
 		cfg:              cfg,
@@ -116,6 +146,13 @@ func (e *PlanAEngine) Decide(step int, date int, taskPoints map[int]*TaskPoint, 
 	omegaW := e.buildOmegaW(tasksList, workers)
 	costWT := e.buildCostWT(tasksList, workers, drones, omegaW, omegaU)
 	assignedTasks, taskToWorker := buildTaskAssignment(costWT, e.cfg.BigM)
+	if e.cfg.UseGeneticDecoder {
+		candidates := candidateTaskIndices(costWT, e.cfg.BigM)
+		if len(candidates) > 0 && len(candidates) <= e.cfg.GeneticMaxTasks {
+			seed := int64(step) + int64(date)*100000
+			assignedTasks, taskToWorker = e.selectTaskAssignmentGenetic(costWT, tasksList, workers, drones, candidates, seed)
+		}
+	}
 	if len(assignedTasks) == 0 {
 		return e.decideOnlyCharging(step, date, drones, cars, chargePoints, taskPoints)
 	}
@@ -276,6 +313,219 @@ func buildTaskAssignment(costWT [][]float64, bigM float64) ([]int, map[int]int) 
 		taskToWorker[tIdx] = j
 	}
 	return assignedTasks, taskToWorker
+}
+
+func candidateTaskIndices(costWT [][]float64, bigM float64) []int {
+	if len(costWT) == 0 {
+		return nil
+	}
+	cols := len(costWT[0])
+	candidates := make([]int, 0, cols)
+	for tIdx := 0; tIdx < cols; tIdx++ {
+		best := math.Inf(1)
+		for w := 0; w < len(costWT); w++ {
+			if tIdx >= len(costWT[w]) {
+				continue
+			}
+			if costWT[w][tIdx] < best {
+				best = costWT[w][tIdx]
+			}
+		}
+		if best < bigM/2 {
+			candidates = append(candidates, tIdx)
+		}
+	}
+	return candidates
+}
+
+func buildTaskAssignmentForTasks(costWT [][]float64, candidates []int, bigM float64) ([]int, map[int]int) {
+	m := len(costWT)
+	n := len(candidates)
+	reduced := make([][]float64, m)
+	for j := 0; j < m; j++ {
+		reduced[j] = make([]float64, n)
+		for k, tIdx := range candidates {
+			if tIdx >= 0 && tIdx < len(costWT[j]) {
+				reduced[j][k] = costWT[j][tIdx]
+			} else {
+				reduced[j][k] = bigM
+			}
+		}
+	}
+	wtAssign := hungarianMin(reduced, bigM)
+	assignedTasks := make([]int, 0)
+	taskToWorker := make(map[int]int)
+	for j, k := range wtAssign {
+		if k < 0 || k >= n {
+			continue
+		}
+		if reduced[j][k] >= bigM/2 {
+			continue
+		}
+		tIdx := candidates[k]
+		if _, exists := taskToWorker[tIdx]; exists {
+			continue
+		}
+		assignedTasks = append(assignedTasks, tIdx)
+		taskToWorker[tIdx] = j
+	}
+	return assignedTasks, taskToWorker
+}
+
+type geneticSolution struct {
+	mask         []bool
+	matched      int
+	sumFinish    int
+	assigned     []int
+	taskToWorker map[int]int
+}
+
+func (e *PlanAEngine) selectTaskAssignmentGenetic(costWT [][]float64, tasksList []*TaskPoint, workers []*Worker, drones []*Drone, candidates []int, seed int64) ([]int, map[int]int) {
+	if len(candidates) == 0 || len(workers) == 0 || len(drones) == 0 {
+		return buildTaskAssignment(costWT, e.cfg.BigM)
+	}
+	rng := rand.New(rand.NewSource(seed))
+	popSize := e.cfg.GeneticPopulation
+	if popSize < 4 {
+		popSize = 4
+	}
+	population := make([]geneticSolution, 0, popSize)
+
+	allMask := make([]bool, len(candidates))
+	for i := range allMask {
+		allMask[i] = true
+	}
+	population = append(population, e.evaluateGeneticMask(allMask, candidates, costWT, tasksList, workers, drones))
+
+	for len(population) < popSize {
+		mask := make([]bool, len(candidates))
+		for i := range mask {
+			mask[i] = rng.Float64() < 0.6
+		}
+		ensureNonEmptyMask(mask, rng)
+		population = append(population, e.evaluateGeneticMask(mask, candidates, costWT, tasksList, workers, drones))
+	}
+
+	best := population[0]
+	for _, sol := range population[1:] {
+		if betterGeneticSolution(sol, best) {
+			best = sol
+		}
+	}
+
+	for gen := 0; gen < e.cfg.GeneticGenerations; gen++ {
+		sort.Slice(population, func(i, j int) bool {
+			return betterGeneticSolution(population[i], population[j])
+		})
+		if betterGeneticSolution(population[0], best) {
+			best = population[0]
+		}
+		elite := e.cfg.GeneticElite
+		if elite < 1 {
+			elite = 1
+		}
+		if elite > len(population) {
+			elite = len(population)
+		}
+		nextPop := make([]geneticSolution, 0, popSize)
+		nextPop = append(nextPop, population[:elite]...)
+		for len(nextPop) < popSize {
+			p1 := tournamentPick(population, rng)
+			p2 := tournamentPick(population, rng)
+			childMask := crossoverMasks(p1.mask, p2.mask, rng)
+			mutateMask(childMask, e.cfg.GeneticMutationRate, rng)
+			ensureNonEmptyMask(childMask, rng)
+			child := e.evaluateGeneticMask(childMask, candidates, costWT, tasksList, workers, drones)
+			nextPop = append(nextPop, child)
+		}
+		population = nextPop
+	}
+
+	if best.assigned == nil {
+		return buildTaskAssignment(costWT, e.cfg.BigM)
+	}
+	return best.assigned, best.taskToWorker
+}
+
+func (e *PlanAEngine) evaluateGeneticMask(mask []bool, candidates []int, costWT [][]float64, tasksList []*TaskPoint, workers []*Worker, drones []*Drone) geneticSolution {
+	chosen := make([]int, 0, len(candidates))
+	for i, ok := range mask {
+		if ok {
+			chosen = append(chosen, candidates[i])
+		}
+	}
+	assigned, taskToWorker := buildTaskAssignmentForTasks(costWT, chosen, e.cfg.BigM)
+	if len(assigned) == 0 {
+		return geneticSolution{mask: mask, matched: 0, sumFinish: math.MaxInt}
+	}
+	costUT := e.buildCostUT(tasksList, workers, drones, assigned, taskToWorker)
+	droneToTaskIdx := buildDroneToTaskIdx(assigned, costUT, e.cfg.BigM)
+	matched := len(droneToTaskIdx)
+	sumFinish := 0
+	for di, tIdx := range droneToTaskIdx {
+		wIdx, ok := taskToWorker[tIdx]
+		if !ok {
+			continue
+		}
+		sumFinish += nFinish(drones[di], workers[wIdx], tasksList[tIdx])
+	}
+	return geneticSolution{
+		mask:         mask,
+		matched:      matched,
+		sumFinish:    sumFinish,
+		assigned:     assigned,
+		taskToWorker: taskToWorker,
+	}
+}
+
+func betterGeneticSolution(a geneticSolution, b geneticSolution) bool {
+	if a.matched != b.matched {
+		return a.matched > b.matched
+	}
+	return a.sumFinish < b.sumFinish
+}
+
+func tournamentPick(pop []geneticSolution, rng *rand.Rand) geneticSolution {
+	best := pop[rng.Intn(len(pop))]
+	for i := 0; i < 2; i++ {
+		cand := pop[rng.Intn(len(pop))]
+		if betterGeneticSolution(cand, best) {
+			best = cand
+		}
+	}
+	return best
+}
+
+func crossoverMasks(a []bool, b []bool, rng *rand.Rand) []bool {
+	child := make([]bool, len(a))
+	for i := range a {
+		if rng.Float64() < 0.5 {
+			child[i] = a[i]
+		} else {
+			child[i] = b[i]
+		}
+	}
+	return child
+}
+
+func mutateMask(mask []bool, rate float64, rng *rand.Rand) {
+	for i := range mask {
+		if rng.Float64() < rate {
+			mask[i] = !mask[i]
+		}
+	}
+}
+
+func ensureNonEmptyMask(mask []bool, rng *rand.Rand) {
+	for _, v := range mask {
+		if v {
+			return
+		}
+	}
+	if len(mask) == 0 {
+		return
+	}
+	mask[rng.Intn(len(mask))] = true
 }
 
 func (e *PlanAEngine) buildCostUT(tasksList []*TaskPoint, workers []*Worker, drones []*Drone, assignedTasks []int, taskToWorker map[int]int) [][]float64 {
