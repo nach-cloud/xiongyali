@@ -33,7 +33,7 @@ var uuidAgent map[string]core.Agent
 //  - call runPlanA() from your existing main.
 
 func main() {
-	name := "result/4.11result/testChargeChangeTask.csv"
+	name := "result/4.11result/testswap.csv"
 	folders := core.DataProcess(name)
 	f, err := os.Open(name)
 	if err != nil {
@@ -87,8 +87,8 @@ func main() {
 			completeTaskCount := 0
 
 			engine := core.NewPlanAEngine(core.PlanAConfig{
-				TopLTasksPerWorker:    50, //50
-				ChargeMeetWindowSteps: 2,
+				TopLTasksPerWorker:    150, //50
+				ChargeMeetWindowSteps: 3,
 				BigM:                  1e9,
 				UseBeamDecoder:        true,
 				BeamMaxTasks:          120,

@@ -2,7 +2,6 @@ package core
 
 import (
 	"math"
-	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
@@ -798,7 +797,7 @@ func (e *PlanAEngine) buildDroneDecisions(drones []*Drone, cars []*Car, tasksLis
 		if !hasTask {
 			continue
 		}
-		t := tasksList[tIdx]
+		//t := tasksList[tIdx]
 		finalDroneTask[di] = tIdx
 	}
 
